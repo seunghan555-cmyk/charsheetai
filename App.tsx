@@ -1,11 +1,11 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import { AppState, ViewType, PartType, CharacterPart, BoundingBox, CharacterView, PoseType, Modification, CustomPart, Language } from "./types";
 import { getInitialAppState, PART_LABELS, INITIAL_VIEW_STATE, POSE_LABELS, TRANSLATIONS } from "./constants";
 import { ImageUploader } from "./components/ImageUploader";
 import { CharacterSheet } from "./components/CharacterSheet";
-import { analyzeCharacterImage, generateCompositeSheet, generateCharacterView, extractColorPalette, generateCharacterFromText } from "./services/geminiService";
+import { analyzeCharacterImage, generateCompositeSheet, generateCharacterView, extractColorPalette, generateCharacterFromText, loadApiKey, saveApiKey, testConnection, clearApiKey, checkGoogleConnection, connectWithGoogle } from "./services/geminiService";
 import { cropImage } from "./utils/imageUtils";
-import { Loader2, Wand2, RefreshCw, Layers, Check, Square, CheckSquare, Zap, Eye, Accessibility, Sparkles, FileImage, Type as TypeIcon, Info, AlertTriangle, Palette, Plus, Trash2, X, ShieldAlert, Globe } from "lucide-react";
+import { Loader2, Wand2, RefreshCw, Layers, Check, Square, CheckSquare, Zap, Eye, Accessibility, Sparkles, FileImage, Type as TypeIcon, Info, AlertTriangle, Palette, Plus, Trash2, X, ShieldAlert, Globe, Key, LogIn, CheckCircle } from "lucide-react";
 
 // Modal Component
 const Modal: React.FC<{
@@ -41,6 +41,8 @@ const Modal: React.FC<{
 
 // Removed dates as requested
 const PATCH_NOTES = [
+    { version: "v1.30", desc: "Auth: Google 계정 연동 로그인 지원. API Key 없이 바로 사용 가능." },
+    { version: "v1.29", desc: "Security: 외부 API Key 사용 기능 추가. (설정 메뉴에서 등록)" },
     { version: "v1.28", desc: "Feature: 다국어 지원 추가 (한국어, English, 日本語, 中文)." },
     { version: "v1.27", desc: "Bug Fix: 초기화 버튼(RESET) 즉시 동작하도록 수정 (확인 팝업 제거). 패치노트 UI 변경. 4면도 생성 전 저작권 확인 팝업 추가." },
     { version: "v1.26", desc: "UX 개선: 초기화 버튼 이동 및 접근성 개선. UI 디자인 미세 조정. 상세 도움말 팝업 추가." },
@@ -76,8 +78,13 @@ const App: React.FC = () => {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   
   // Modal State
-  const [activeModal, setActiveModal] = useState<'usage' | 'patch' | null>(null);
+  const [activeModal, setActiveModal] = useState<'usage' | 'patch' | 'apikey' | null>(null);
   
+  // API Key & Auth Management State
+  const [apiKeyInput, setApiKeyInput] = useState("");
+  const [apiConnectionStatus, setApiConnectionStatus] = useState<'idle' | 'testing' | 'success' | 'fail'>('idle');
+  const [isGoogleConnected, setIsGoogleConnected] = useState(false);
+
   // Copyright Confirmation State
   const [showCopyrightWarning, setShowCopyrightWarning] = useState(false);
 
@@ -89,6 +96,35 @@ const App: React.FC = () => {
   const [selectedParts, setSelectedParts] = useState<string[]>(Object.values(PartType));
   // State for selected pose
   const [targetPose, setTargetPose] = useState<PoseType>(PoseType.A_POSE);
+
+  // Load API key on mount and check Google Connection
+  useEffect(() => {
+    // 1. Check local key
+    const loadedKey = loadApiKey();
+    if (loadedKey) {
+        setApiKeyInput(loadedKey);
+    }
+
+    // 2. Check Google Auth
+    const checkAuth = async () => {
+        const connected = await checkGoogleConnection();
+        setIsGoogleConnected(connected);
+    };
+    checkAuth();
+  }, []);
+
+  // Handler for Google Login
+  const handleGoogleLogin = async () => {
+      const success = await connectWithGoogle();
+      if (success) {
+          setIsGoogleConnected(true);
+          // If google connects successfully, we can clear the manual connection status UI to avoid confusion
+          setApiConnectionStatus('idle');
+          // Clear manual key from input if desired, or keep it.
+          // Note: process.env.API_KEY is prioritized in getApiKey()
+          setActiveModal(null); // Close modal if open
+      }
+  };
 
   // Computed state to check if we have a full reference set
   const hasAllViews = useMemo(() => {
@@ -893,6 +929,26 @@ const App: React.FC = () => {
           globalStylePrompt: val
       }));
   };
+  
+  // API Key Handlers
+  const handleTestApiKey = async () => {
+      if (!apiKeyInput) return;
+      setApiConnectionStatus('testing');
+      const success = await testConnection(apiKeyInput);
+      setApiConnectionStatus(success ? 'success' : 'fail');
+  };
+  
+  const handleSaveApiKey = () => {
+      if (!apiKeyInput) return;
+      saveApiKey(apiKeyInput);
+      setActiveModal(null);
+  };
+  
+  const handleClearApiKey = () => {
+      clearApiKey();
+      setApiKeyInput("");
+      setApiConnectionStatus('idle');
+  };
 
   return (
     <div className="min-h-screen bg-[#f4f4f4] text-slate-900 p-4 md:p-8 font-sans">
@@ -907,23 +963,60 @@ const App: React.FC = () => {
         {/* Header Section */}
         <div className="relative text-center mb-12 pt-10">
           
-          {/* Language Selector (Top Right) */}
-          <div className="absolute top-0 right-0 z-50 flex items-center gap-2">
-              <Globe size={18} className="text-slate-400" />
-              <select 
-                  value={language}
-                  onChange={(e) => {
-                      setLanguage(e.target.value as Language);
-                      // Update Status text immediately when language changes
-                      setStatusText(TRANSLATIONS[e.target.value as Language].status_waiting);
-                  }}
-                  className="bg-transparent text-sm font-bold text-slate-600 hover:text-[#0F4C81] focus:outline-none cursor-pointer appearance-none uppercase"
+          {/* Top Right Controls: API Key & Language */}
+          <div className="absolute top-0 right-0 z-50 flex items-center gap-4">
+              
+              {/* Google Login Status Button */}
+              {isGoogleConnected ? (
+                  <button 
+                      className="flex items-center gap-2 text-green-600 bg-white/80 px-3 py-1.5 rounded-full shadow-sm border border-green-100 hover:border-green-300 transition-colors"
+                      title="Google 계정으로 연결됨"
+                  >
+                      <CheckCircle size={16} className="fill-green-100" />
+                      <span className="text-xs font-bold uppercase hidden md:inline">Connected</span>
+                  </button>
+              ) : (
+                  <button 
+                      onClick={handleGoogleLogin}
+                      className="flex items-center gap-2 text-white bg-[#0F4C81] px-4 py-1.5 rounded-full shadow-md hover:bg-blue-900 transition-colors animate-pulse-subtle"
+                      title="Google 계정으로 로그인 (API Key 자동 설정)"
+                  >
+                      <LogIn size={14} />
+                      <span className="text-xs font-bold uppercase">Google Login</span>
+                  </button>
+              )}
+
+              {/* API Key Button - Changes appearance if connected */}
+              <button 
+                  onClick={() => setActiveModal('apikey')}
+                  className={`
+                    flex items-center gap-2 transition-colors
+                    ${isGoogleConnected ? 'text-slate-300 hover:text-slate-500' : 'text-slate-400 hover:text-[#0F4C81]'}
+                  `}
+                  title="API Key Settings"
               >
-                  <option value={Language.KO}>한국어</option>
-                  <option value={Language.EN}>English</option>
-                  <option value={Language.JA}>日本語</option>
-                  <option value={Language.ZH}>中文</option>
-              </select>
+                  <Key size={18} />
+                  <span className="text-xs font-bold uppercase hidden md:inline">API Key</span>
+              </button>
+
+              {/* Language Selector */}
+              <div className="flex items-center gap-2 border-l border-slate-300 pl-4">
+                  <Globe size={18} className="text-slate-400" />
+                  <select 
+                      value={language}
+                      onChange={(e) => {
+                          setLanguage(e.target.value as Language);
+                          // Update Status text immediately when language changes
+                          setStatusText(TRANSLATIONS[e.target.value as Language].status_waiting);
+                      }}
+                      className="bg-transparent text-sm font-bold text-slate-600 hover:text-[#0F4C81] focus:outline-none cursor-pointer appearance-none uppercase"
+                  >
+                      <option value={Language.KO}>한국어</option>
+                      <option value={Language.EN}>English</option>
+                      <option value={Language.JA}>日本語</option>
+                      <option value={Language.ZH}>中文</option>
+                  </select>
+              </div>
           </div>
 
           <div className="flex items-center justify-center gap-4 mb-4">
@@ -984,7 +1077,6 @@ const App: React.FC = () => {
              <div className="space-y-8 text-slate-800">
                  {/* Usage Content simplified for translation or just kept simple */}
                  <p className="text-sm">{t.usage_desc}</p>
-                 {/* (For brevity, full usage guide translation logic can be expanded, but main steps are clearer in UI now) */}
              </div>
         </Modal>
 
@@ -1002,6 +1094,111 @@ const App: React.FC = () => {
                          </p>
                      </div>
                  ))}
+             </div>
+        </Modal>
+        
+        {/* API KEY MODAL */}
+        <Modal isOpen={activeModal === 'apikey'} onClose={() => setActiveModal(null)} title="API Key 설정">
+             <div className="space-y-8">
+                 
+                 {/* Section 1: Google Auth (Recommended) */}
+                 <div className={`p-5 rounded-lg border-2 transition-all ${isGoogleConnected ? 'bg-green-50 border-green-200' : 'bg-slate-50 border-slate-100'}`}>
+                     <div className="flex items-center gap-3 mb-3">
+                         <div className={`p-2 rounded-full ${isGoogleConnected ? 'bg-green-100 text-green-700' : 'bg-white text-slate-700 shadow-sm'}`}>
+                             <LogIn size={20} />
+                         </div>
+                         <h3 className="font-bold text-lg text-slate-800">Google 계정으로 자동 연결</h3>
+                         {isGoogleConnected && <span className="text-xs bg-green-200 text-green-800 px-2 py-0.5 rounded font-bold uppercase">Active</span>}
+                     </div>
+                     
+                     <p className="text-sm text-slate-500 mb-4 leading-relaxed">
+                         Google 계정으로 로그인하면 별도의 API Key 입력 없이<br/>
+                         Gemini AI 기능을 즉시 사용할 수 있습니다. (권장)
+                     </p>
+                     
+                     {isGoogleConnected ? (
+                         <div className="flex items-center gap-2 text-green-700 font-bold bg-green-100/50 p-3 rounded">
+                             <CheckCircle size={18} />
+                             Google 계정과 성공적으로 연결되었습니다.
+                         </div>
+                     ) : (
+                         <button 
+                            onClick={handleGoogleLogin}
+                            className="w-full bg-[#0F4C81] hover:bg-blue-900 text-white py-3 rounded font-bold transition-colors flex items-center justify-center gap-2 shadow-lg"
+                         >
+                             <Zap size={18} className="fill-white" />
+                             Google 계정으로 로그인
+                         </button>
+                     )}
+                 </div>
+                 
+                 <div className="relative flex items-center justify-center">
+                     <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-slate-200"></div></div>
+                     <span className="relative bg-white px-4 text-xs font-bold text-slate-400 uppercase tracking-widest">OR</span>
+                 </div>
+
+                 {/* Section 2: Manual Key Entry */}
+                 <div className={isGoogleConnected ? 'opacity-50 pointer-events-none grayscale' : ''}>
+                     <div className="bg-slate-50 p-4 rounded text-sm text-slate-600 leading-relaxed mb-4">
+                         <p className="font-bold mb-1">수동 API Key 입력</p>
+                         <p className="text-xs opacity-80">
+                            직접 발급받은 Google Gemini API Key가 있다면 아래에 입력해주세요.<br/>
+                            입력된 키는 브라우저에 암호화되어 저장됩니다.
+                         </p>
+                     </div>
+
+                     <div className="flex flex-col gap-2 mb-4">
+                         <label className="text-sm font-bold text-slate-700 uppercase">Google Gemini API Key</label>
+                         <input 
+                            type="password" 
+                            value={apiKeyInput}
+                            onChange={(e) => {
+                                setApiKeyInput(e.target.value);
+                                setApiConnectionStatus('idle');
+                            }}
+                            placeholder="AIzaSy..."
+                            className="w-full p-3 border border-slate-300 rounded focus:border-[#0F4C81] focus:outline-none font-mono text-sm"
+                            disabled={isGoogleConnected}
+                         />
+                     </div>
+
+                     <div className="flex items-center gap-3">
+                         <button
+                            onClick={handleTestApiKey}
+                            disabled={!apiKeyInput || apiConnectionStatus === 'testing' || isGoogleConnected}
+                            className={`
+                                px-4 py-2 rounded text-sm font-bold transition-colors flex items-center gap-2
+                                ${apiConnectionStatus === 'success' ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'}
+                            `}
+                         >
+                             {apiConnectionStatus === 'testing' && <Loader2 size={14} className="animate-spin" />}
+                             {apiConnectionStatus === 'success' && <Check size={14} />}
+                             {apiConnectionStatus === 'fail' && <AlertTriangle size={14} />}
+                             
+                             {apiConnectionStatus === 'idle' && "연결 테스트"}
+                             {apiConnectionStatus === 'testing' && "테스트 중..."}
+                             {apiConnectionStatus === 'success' && "연결 성공"}
+                             {apiConnectionStatus === 'fail' && "연결 실패"}
+                         </button>
+                     </div>
+                 </div>
+
+                 <div className="pt-4 border-t border-slate-100 flex justify-between items-center">
+                     <button 
+                        onClick={handleClearApiKey}
+                        className="text-red-500 text-sm font-bold hover:underline disabled:opacity-50"
+                        disabled={!apiKeyInput}
+                     >
+                         저장된 키 삭제
+                     </button>
+                     <button
+                        onClick={handleSaveApiKey}
+                        disabled={!apiKeyInput || isGoogleConnected}
+                        className="bg-slate-800 text-white px-6 py-2 rounded font-bold hover:bg-black transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                     >
+                         수동 입력 저장
+                     </button>
+                 </div>
              </div>
         </Modal>
 

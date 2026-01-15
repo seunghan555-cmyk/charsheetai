@@ -108,3 +108,15 @@ export interface GeminiPartAnalysis {
       box: number[];
   }[];
 }
+
+// Global window extension for Google AI Studio
+declare global {
+  interface AIStudio {
+    hasSelectedApiKey: () => Promise<boolean>;
+    openSelectKey: () => Promise<void>;
+  }
+
+  interface Window {
+    aistudio?: AIStudio;
+  }
+}
