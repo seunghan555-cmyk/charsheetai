@@ -1,7 +1,7 @@
 
 import React, { useState, useMemo, useRef, useEffect } from "react";
 import { AppState, ViewType, PartType, CharacterPart, BoundingBox, CharacterView, PoseType, Modification, CustomPart, Language, ViewHistoryItem, PartHistoryItem } from "./types";
-import { getInitialAppState, PART_LABELS, INITIAL_VIEW_STATE, POSE_LABELS, TRANSLATIONS } from "./constants";
+import { getInitialAppState, PART_LABELS, INITIAL_VIEW_STATE, POSE_LABELS, TRANSLATIONS } from "./src/constants";
 import { ImageUploader } from "./components/ImageUploader";
 import { CharacterSheet } from "./components/CharacterSheet";
 import { analyzeCharacterImage, generateCompositeSheet, generateCharacterView, extractColorPalette, generateCharacterFromText, upscaleImage, testApiKeyConnection } from "./services/geminiService";
