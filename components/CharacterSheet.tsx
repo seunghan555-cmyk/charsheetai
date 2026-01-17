@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useRef } from "react";
 import { AppState, ViewType, PartType, Language } from "../types";
-import { TRANSLATIONS } from "../constants";
+import { TRANSLATIONS } from "../src/constants";
 import { Download, Loader2, RefreshCw, Layers, Check, Plus, X, Send, ImagePlus, Paperclip, Camera, ImageDown, Zap, Wand2, RotateCcw, ZoomIn, MoveVertical, MoveHorizontal, Search, Coffee, SplitSquareHorizontal, ArrowLeftRight, Sparkles, ChevronsUp, CheckSquare, Square, SlidersHorizontal, Undo2, Redo2, FolderArchive } from "lucide-react";
 import html2canvas from "html2canvas";
 import JSZip from "jszip";

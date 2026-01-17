@@ -1,7 +1,7 @@
 
 import { GoogleGenAI, Type } from "@google/genai";
 import { BoundingBox, GeminiPartAnalysis, PartType, ViewType, PoseType, Modification } from "../types";
-import { PART_LABELS } from "../constants";
+import { PART_LABELS } from "../src/constants";
 import { getApiKey } from "../utils/keyStorage";
 
 // Helper to remove data:image/...;base64, prefix
