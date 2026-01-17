@@ -3,7 +3,7 @@ import React, { useState, useRef } from "react";
 import { Upload, X } from "lucide-react";
 import { fileToBase64 } from "../utils/imageUtils";
 import { Language } from "../types";
-import { TRANSLATIONS } from "../constants";
+import { TRANSLATIONS } from "../src/constants";
 
 interface ImageUploaderProps {
   label: string;
