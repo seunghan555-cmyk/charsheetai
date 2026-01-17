@@ -1,5 +1,5 @@
 
-import { PartType, ViewType, PoseType, AppState, Language, CharacterView, GeneratedPartSheet } from "./types";
+import { PartType, ViewType, PoseType, AppState, Language, CharacterView, GeneratedPartSheet } from "../types";
 
 export const VIEW_LABELS = {
   [ViewType.FRONT]: 'FRONT',
