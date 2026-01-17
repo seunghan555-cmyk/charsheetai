@@ -1,5 +1,5 @@
 {
-  "name": "Copy of CharSheet AI",
+  "name": "CharSheet AI",
   "description": "A character sheet generator that analyzes Front, Side, and Back views of a character to automatically create zoomed-in detail sheets for equipment and parts.",
   "requestFramePermissions": []
 }

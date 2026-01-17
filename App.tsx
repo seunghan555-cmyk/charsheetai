@@ -1,11 +1,14 @@
-import React, { useState, useMemo, useEffect } from "react";
-import { AppState, ViewType, PartType, CharacterPart, BoundingBox, CharacterView, PoseType, Modification, CustomPart, Language } from "./types";
+
+import React, { useState, useMemo, useRef, useEffect } from "react";
+import { AppState, ViewType, PartType, CharacterPart, BoundingBox, CharacterView, PoseType, Modification, CustomPart, Language, ViewHistoryItem, PartHistoryItem } from "./types";
 import { getInitialAppState, PART_LABELS, INITIAL_VIEW_STATE, POSE_LABELS, TRANSLATIONS } from "./constants";
 import { ImageUploader } from "./components/ImageUploader";
 import { CharacterSheet } from "./components/CharacterSheet";
-import { analyzeCharacterImage, generateCompositeSheet, generateCharacterView, extractColorPalette, generateCharacterFromText, loadApiKey, saveApiKey, testConnection, clearApiKey, checkGoogleConnection, connectWithGoogle } from "./services/geminiService";
+import { analyzeCharacterImage, generateCompositeSheet, generateCharacterView, extractColorPalette, generateCharacterFromText, upscaleImage, testApiKeyConnection } from "./services/geminiService";
 import { cropImage } from "./utils/imageUtils";
-import { Loader2, Wand2, RefreshCw, Layers, Check, Square, CheckSquare, Zap, Eye, Accessibility, Sparkles, FileImage, Type as TypeIcon, Info, AlertTriangle, Palette, Plus, Trash2, X, ShieldAlert, Globe, Key, LogIn, CheckCircle } from "lucide-react";
+import { Loader2, Wand2, RefreshCw, Layers, Check, Square, CheckSquare, Zap, Eye, Accessibility, Sparkles, FileImage, Type as TypeIcon, Info, AlertTriangle, Palette, Plus, Trash2, X, ShieldAlert, Globe, Coffee, Heart, Key, ExternalLink } from "lucide-react";
+import { Mascot } from "./components/Mascot";
+import { saveApiKey, getApiKey, clearApiKey, hasApiKey } from "./utils/keyStorage";
 
 // Modal Component
 const Modal: React.FC<{
@@ -20,7 +23,7 @@ const Modal: React.FC<{
             <div className="bg-white w-full max-w-2xl max-h-[85vh] overflow-hidden shadow-2xl flex flex-col animate-scale-in rounded-lg" onClick={e => e.stopPropagation()}>
                 <div className="p-5 border-b border-slate-100 flex justify-between items-center bg-slate-50">
                     <h2 className="text-xl font-black uppercase tracking-widest text-[#0F4C81] flex items-center gap-2">
-                        {title}
+                        <Mascot size={28} /> {title}
                     </h2>
                     <button onClick={onClose} className="p-2 hover:bg-slate-200 rounded-full transition-colors text-slate-400 hover:text-red-500">
                         <X size={24} />
@@ -31,7 +34,7 @@ const Modal: React.FC<{
                 </div>
                 <div className="p-4 border-t border-slate-100 bg-slate-50 text-right">
                     <button onClick={onClose} className="px-6 py-2 bg-slate-800 text-white font-bold rounded hover:bg-black transition-colors">
-                        닫기
+                        Close
                     </button>
                 </div>
             </div>
@@ -39,30 +42,28 @@ const Modal: React.FC<{
     );
 };
 
-// Removed dates as requested
-const PATCH_NOTES = [
-    { version: "v1.30", desc: "Auth: Google 계정 연동 로그인 지원. API Key 없이 바로 사용 가능." },
-    { version: "v1.29", desc: "Security: 외부 API Key 사용 기능 추가. (설정 메뉴에서 등록)" },
-    { version: "v1.28", desc: "Feature: 다국어 지원 추가 (한국어, English, 日本語, 中文)." },
-    { version: "v1.27", desc: "Bug Fix: 초기화 버튼(RESET) 즉시 동작하도록 수정 (확인 팝업 제거). 패치노트 UI 변경. 4면도 생성 전 저작권 확인 팝업 추가." },
-    { version: "v1.26", desc: "UX 개선: 초기화 버튼 이동 및 접근성 개선. UI 디자인 미세 조정. 상세 도움말 팝업 추가." },
-    { version: "v1.25", desc: "Rebranding: Charsheet AI로 명칭 변경. 기타(Custom) 파츠 입력 방식 개선 (직접 입력 후 추가)." },
-    { version: "v1.24", desc: "Bug Fix: '새 프로젝트 시작' 버튼 상태 초기화 로직 수정." },
-    { version: "v1.23", desc: "기능 개선: 기타 파츠 자동 크롭 인식률 향상. UI 버튼 크기 통일." },
-    { version: "v1.20", desc: "Core Update: 4면도 생성 알고리즘 강화 (Gemini 2.5 Flash 적용). 반측면 뷰 추가." },
-    { version: "v1.0", desc: "Initial Release." }
-];
-
 const App: React.FC = () => {
   const [appState, setAppState] = useState<AppState>(getInitialAppState());
+  
   const [isProcessing, setIsProcessing] = useState(false);
-  const [processingView, setProcessingView] = useState<ViewType | null>(null); // Track which view is regenerating
-  const [globalProgress, setGlobalProgress] = useState(0); // Actual progress percentage (0-100)
   
-  const [isMultiView, setIsMultiView] = useState(false); // Default to Single View
-  const [isSingleViewMode, setIsSingleViewMode] = useState(false); // Mode: Generate sheet from just 1 image
-  const [isTextMode, setIsTextMode] = useState(false); // Mode: Generate from Text
+  // Concurrency Support
+  const [processingViews, setProcessingViews] = useState<ViewType[]>([]); 
+  const [upscalingViews, setUpscalingViews] = useState<ViewType[]>([]);
+  // Changed from single part string to array for batch support
+  const [upscalingParts, setUpscalingParts] = useState<string[]>([]);
+  const [globalProgress, setGlobalProgress] = useState(0); 
   
+  const [isMultiView, setIsMultiView] = useState(false); 
+  const [isSingleViewMode, setIsSingleViewMode] = useState(false); 
+  const [isTextMode, setIsTextMode] = useState(false); 
+  
+  // Selection state for Batch View Operations
+  const [selectedViewIds, setSelectedViewIds] = useState<ViewType[]>([ViewType.FRONT, ViewType.SEMI_SIDE, ViewType.SIDE, ViewType.BACK]);
+
+  // Reference Balance State (0 = Original Only, 10 = Generated Only, 5 = Both)
+  const [referenceBalance, setReferenceBalance] = useState<number>(5);
+
   // Language State
   const [language, setLanguage] = useState<Language>(Language.KO);
   const t = TRANSLATIONS[language];
@@ -78,69 +79,252 @@ const App: React.FC = () => {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   
   // Modal State
-  const [activeModal, setActiveModal] = useState<'usage' | 'patch' | 'apikey' | null>(null);
+  const [activeModal, setActiveModal] = useState<'usage' | 'patch' | 'coffee' | 'apikey' | null>(null);
   
-  // API Key & Auth Management State
-  const [apiKeyInput, setApiKeyInput] = useState("");
-  const [apiConnectionStatus, setApiConnectionStatus] = useState<'idle' | 'testing' | 'success' | 'fail'>('idle');
-  const [isGoogleConnected, setIsGoogleConnected] = useState(false);
-
   // Copyright Confirmation State
   const [showCopyrightWarning, setShowCopyrightWarning] = useState(false);
+
+  // API Key State (Internal for Modal)
+  const [apiKeyInput, setApiKeyInput] = useState("");
+  const [apiKeyStatus, setApiKeyStatus] = useState<string | null>(null);
+  
+  // API Key Status for UI (Reactive)
+  const [hasKeyConfigured, setHasKeyConfigured] = useState(false);
 
   // Controls the visibility of the detailed part rows (Step 2)
   const [showDetailSheets, setShowDetailSheets] = useState(false);
   
   // State for selecting which parts to generate
-  // Initially Standard parts
   const [selectedParts, setSelectedParts] = useState<string[]>(Object.values(PartType));
-  // State for selected pose
   const [targetPose, setTargetPose] = useState<PoseType>(PoseType.A_POSE);
 
-  // Load API key on mount and check Google Connection
   useEffect(() => {
-    // 1. Check local key
-    const loadedKey = loadApiKey();
-    if (loadedKey) {
-        setApiKeyInput(loadedKey);
-    }
-
-    // 2. Check Google Auth
-    const checkAuth = async () => {
-        const connected = await checkGoogleConnection();
-        setIsGoogleConnected(connected);
-    };
-    checkAuth();
+      // Check for existing API key on load
+      const existingKey = getApiKey();
+      if (existingKey) {
+          setApiKeyInput(existingKey);
+          setHasKeyConfigured(true);
+      } else {
+          setHasKeyConfigured(false);
+      }
   }, []);
 
-  // Handler for Google Login
-  const handleGoogleLogin = async () => {
-      const success = await connectWithGoogle();
-      if (success) {
-          setIsGoogleConnected(true);
-          // If google connects successfully, we can clear the manual connection status UI to avoid confusion
-          setApiConnectionStatus('idle');
-          // Clear manual key from input if desired, or keep it.
-          // Note: process.env.API_KEY is prioritized in getApiKey()
-          setActiveModal(null); // Close modal if open
-      }
-  };
-
-  // Computed state to check if we have a full reference set
   const hasAllViews = useMemo(() => {
-      // In Single View Mode, we only need the Front view
       if (isSingleViewMode) {
           return !!appState.views[ViewType.FRONT].originalImage;
       }
-      // In Standard Mode, we need all 4 (Front, Semi, Side, Back)
-      // Note: Semi-Side is now mandatory for the full sheet experience in V1.18
       return !!(appState.views[ViewType.FRONT].originalImage && 
                 appState.views[ViewType.SEMI_SIDE].originalImage && 
                 appState.views[ViewType.SIDE].originalImage && 
                 appState.views[ViewType.BACK].originalImage);
   }, [appState.views, isSingleViewMode]);
 
-  // Helper to update view state
+  // Helper to enforce API Key presence
+  const verifyApiKey = (): boolean => {
+      if (!hasApiKey() && !process.env.API_KEY) {
+          alert(t.no_key_warning);
+          setActiveModal('apikey');
+          return false;
+      }
+      return true;
+  };
+
+  // --- LOCAL HISTORY MANAGEMENT ---
+  const HISTORY_LIMIT = 10;
+
+  const recordViewHistory = (view: ViewType) => {
+      setAppState(prev => {
+          const viewData = prev.views[view];
+          const newItem: ViewHistoryItem = {
+              originalImage: viewData.originalImage,
+              generatedImage: viewData.generatedImage,
+              modifications: viewData.modifications
+          };
+          
+          let newUndo = [...viewData.history.undoStack, newItem];
+          if (newUndo.length > HISTORY_LIMIT) {
+              newUndo = newUndo.slice(newUndo.length - HISTORY_LIMIT);
+          }
+
+          return {
+              ...prev,
+              views: {
+                  ...prev.views,
+                  [view]: {
+                      ...viewData,
+                      history: {
+                          undoStack: newUndo,
+                          redoStack: [] // Clear redo on new action
+                      }
+                  }
+              }
+          };
+      });
+  };
+
+  const recordPartHistory = (part: string) => {
+      setAppState(prev => {
+          const sheet = prev.generatedSheets[part];
+          const newItem: PartHistoryItem = {
+              imgUrl: sheet.imgUrl,
+              modifications: sheet.modifications
+          };
+
+          let newUndo = [...sheet.history.undoStack, newItem];
+          if (newUndo.length > HISTORY_LIMIT) {
+              newUndo = newUndo.slice(newUndo.length - HISTORY_LIMIT);
+          }
+
+          return {
+              ...prev,
+              generatedSheets: {
+                  ...prev.generatedSheets,
+                  [part]: {
+                      ...sheet,
+                      history: {
+                          undoStack: newUndo,
+                          redoStack: []
+                      }
+                  }
+              }
+          };
+      });
+  };
+
+  const handleViewUndo = (view: ViewType) => {
+      setAppState(prev => {
+          const viewData = prev.views[view];
+          const undoStack = viewData.history.undoStack;
+          if (undoStack.length === 0) return prev;
+
+          const previousState = undoStack[undoStack.length - 1];
+          const newUndoStack = undoStack.slice(0, undoStack.length - 1);
+
+          // Current state becomes redo item
+          const redoItem: ViewHistoryItem = {
+              originalImage: viewData.originalImage,
+              generatedImage: viewData.generatedImage,
+              modifications: viewData.modifications
+          };
+
+          return {
+              ...prev,
+              views: {
+                  ...prev.views,
+                  [view]: {
+                      ...viewData,
+                      originalImage: previousState.originalImage,
+                      generatedImage: previousState.generatedImage,
+                      modifications: previousState.modifications,
+                      history: {
+                          undoStack: newUndoStack,
+                          redoStack: [...viewData.history.redoStack, redoItem]
+                      }
+                  }
+              }
+          };
+      });
+  };
+
+  const handleViewRedo = (view: ViewType) => {
+      setAppState(prev => {
+          const viewData = prev.views[view];
+          const redoStack = viewData.history.redoStack;
+          if (redoStack.length === 0) return prev;
+
+          const nextState = redoStack[redoStack.length - 1];
+          const newRedoStack = redoStack.slice(0, redoStack.length - 1);
+
+          // Current state becomes undo item
+          const undoItem: ViewHistoryItem = {
+              originalImage: viewData.originalImage,
+              generatedImage: viewData.generatedImage,
+              modifications: viewData.modifications
+          };
+
+          return {
+              ...prev,
+              views: {
+                  ...prev.views,
+                  [view]: {
+                      ...viewData,
+                      originalImage: nextState.originalImage,
+                      generatedImage: nextState.generatedImage,
+                      modifications: nextState.modifications,
+                      history: {
+                          undoStack: [...viewData.history.undoStack, undoItem],
+                          redoStack: newRedoStack
+                      }
+                  }
+              }
+          };
+      });
+  };
+
+  const handlePartUndo = (part: string) => {
+      setAppState(prev => {
+          const sheet = prev.generatedSheets[part];
+          const undoStack = sheet.history.undoStack;
+          if (undoStack.length === 0) return prev;
+
+          const previousState = undoStack[undoStack.length - 1];
+          const newUndoStack = undoStack.slice(0, undoStack.length - 1);
+
+          const redoItem: PartHistoryItem = {
+              imgUrl: sheet.imgUrl,
+              modifications: sheet.modifications
+          };
+
+          return {
+              ...prev,
+              generatedSheets: {
+                  ...prev.generatedSheets,
+                  [part]: {
+                      ...sheet,
+                      imgUrl: previousState.imgUrl,
+                      modifications: previousState.modifications,
+                      history: {
+                          undoStack: newUndoStack,
+                          redoStack: [...sheet.history.redoStack, redoItem]
+                      }
+                  }
+              }
+          };
+      });
+  };
+
+  const handlePartRedo = (part: string) => {
+      setAppState(prev => {
+          const sheet = prev.generatedSheets[part];
+          const redoStack = sheet.history.redoStack;
+          if (redoStack.length === 0) return prev;
+
+          const nextState = redoStack[redoStack.length - 1];
+          const newRedoStack = redoStack.slice(0, redoStack.length - 1);
+
+          const undoItem: PartHistoryItem = {
+              imgUrl: sheet.imgUrl,
+              modifications: sheet.modifications
+          };
+
+          return {
+              ...prev,
+              generatedSheets: {
+                  ...prev.generatedSheets,
+                  [part]: {
+                      ...sheet,
+                      imgUrl: nextState.imgUrl,
+                      modifications: nextState.modifications,
+                      history: {
+                          undoStack: [...sheet.history.undoStack, undoItem],
+                          redoStack: newRedoStack
+                      }
+                  }
+              }
+          };
+      });
+  };
+
   const updateViewState = (view: ViewType, updates: Partial<CharacterView>) => {
     setAppState(prev => ({
       ...prev,
@@ -157,12 +341,38 @@ const App: React.FC = () => {
     );
   };
 
+  const toggleViewSelection = (view: ViewType) => {
+      setSelectedViewIds(prev => 
+        prev.includes(view) ? prev.filter(v => v !== view) : [...prev, view]
+      );
+  };
+
   const handleUpload = (view: ViewType, base64: string) => {
     updateViewState(view, {
       originalImage: base64,
-      userUploadedImage: base64, // Store the raw upload
-      parts: INITIAL_VIEW_STATE(view).parts // Reset parts on new upload
+      userUploadedImage: base64, 
+      parts: INITIAL_VIEW_STATE(view).parts 
     });
+  };
+
+  const handleSwapViewImage = (view: ViewType, type: 'user' | 'generated') => {
+      setAppState(prev => {
+          const viewData = prev.views[view];
+          const targetImage = type === 'user' ? viewData.userUploadedImage : viewData.generatedImage;
+          
+          if (!targetImage) return prev; 
+
+          return {
+              ...prev,
+              views: {
+                  ...prev.views,
+                  [view]: {
+                      ...viewData,
+                      originalImage: targetImage
+                  }
+              }
+          };
+      });
   };
 
   const handleAddManualReference = (part: string, base64: string | null) => {
@@ -206,10 +416,10 @@ const App: React.FC = () => {
     updateViewState(view, INITIAL_VIEW_STATE(view));
   };
 
-  // RESET PROJECT - Removed window.confirm for immediate action
   const handleResetProject = () => {
     setAppState(getInitialAppState());
     setSelectedParts(Object.values(PartType));
+    setSelectedViewIds([ViewType.FRONT, ViewType.SEMI_SIDE, ViewType.SIDE, ViewType.BACK]);
     setShowDetailSheets(false);
     setIsMultiView(false);
     setIsSingleViewMode(false);
@@ -221,6 +431,34 @@ const App: React.FC = () => {
     setIsProcessing(false);
     setGlobalProgress(0);
     setStatusText(t.status_waiting);
+    setReferenceBalance(5); // Reset balance
+  };
+
+  const handleToggleSingleView = () => {
+    if (isSingleViewMode) {
+      setIsSingleViewMode(false);
+    } else {
+      setIsSingleViewMode(true);
+      setIsMultiView(false);
+      setIsTextMode(false);
+    }
+  };
+
+  const handleToggleTextMode = () => {
+    if (isTextMode) {
+      setIsTextMode(false);
+    } else {
+      setIsTextMode(true);
+      setIsMultiView(false);
+      setIsSingleViewMode(false);
+    }
+  };
+
+  const handleStylePromptChange = (val: string) => {
+    setAppState(prev => ({
+      ...prev,
+      globalStylePrompt: val
+    }));
   };
 
   // --- CUSTOM PARTS LOGIC ---
@@ -233,26 +471,23 @@ const App: React.FC = () => {
       setAppState(prev => ({
           ...prev,
           customParts: [...prev.customParts, newPart],
-          // Initialize empty sheet and refs for this new part
           generatedSheets: {
               ...prev.generatedSheets,
-              [newId]: { partType: newId, imgUrl: null, isLoading: false, modifications: [] }
+              [newId]: { partType: newId, imgUrl: null, isLoading: false, modifications: [], history: { undoStack: [], redoStack: [] } }
           },
           manualReferences: {
               ...prev.manualReferences,
               [newId]: []
           }
       }));
-      // Automatically select the new part
       setSelectedParts(prev => [...prev, newId]);
-      setCustomPartInput(""); // Reset input
+      setCustomPartInput(""); 
   };
 
   const handleRemoveCustomPart = (id: string) => {
       setAppState(prev => ({
           ...prev,
           customParts: prev.customParts.filter(p => p.id !== id),
-          // Clean up generated data (optional, but good for memory)
           generatedSheets: Object.fromEntries(Object.entries(prev.generatedSheets).filter(([k]) => k !== id)),
           manualReferences: Object.fromEntries(Object.entries(prev.manualReferences).filter(([k]) => k !== id))
       }));
@@ -266,23 +501,36 @@ const App: React.FC = () => {
       }));
   };
 
+  // --- API Key Handlers ---
+  const handleSaveApiKey = () => {
+      saveApiKey(apiKeyInput);
+      setApiKeyStatus(null);
+      setHasKeyConfigured(true);
+      alert("API Key Saved Locally!");
+  };
+
+  const handleClearApiKey = () => {
+      clearApiKey();
+      setApiKeyInput("");
+      setApiKeyStatus(null);
+      setHasKeyConfigured(false);
+  };
+
+  const handleTestConnection = async () => {
+      setApiKeyStatus("testing");
+      const success = await testApiKeyConnection(apiKeyInput);
+      setApiKeyStatus(success ? "success" : "fail");
+  };
+
   // Phase 1: Analyze and Crop for a specific view
   const processViewAnalysis = async (view: ViewType, imageData: CharacterView) => {
-    // Prefer the user's raw upload for analysis to get max fidelity crops.
-    // Fallback to originalImage (which might be the generated/normalized one).
-    const imageToAnalyze = imageData.userUploadedImage || imageData.originalImage;
-    
+    const imageToAnalyze = imageData.originalImage;
     if (!imageToAnalyze) return null;
 
     try {
-      // Pass custom labels to analysis
       const customLabels = appState.customParts.map(p => p.label);
       const analysis = await analyzeCharacterImage(imageToAnalyze, customLabels);
-      
-      if (!analysis) {
-        console.warn(`Failed to analyze ${view} view.`);
-        return null;
-      }
+      if (!analysis) return null;
 
       const newParts = { ...imageData.parts };
       const partMappings: { type: string; coords?: number[] }[] = [
@@ -299,7 +547,6 @@ const App: React.FC = () => {
         { type: PartType.ACCESSORY, coords: analysis.accessory },
       ];
 
-      // Standard parts
       for (const mapping of partMappings) {
         if (mapping.coords && mapping.coords.length === 4 && mapping.coords.some(c => c > 0)) {
           const [ymin, xmin, ymax, xmax] = mapping.coords;
@@ -308,19 +555,16 @@ const App: React.FC = () => {
 
           newParts[mapping.type] = {
             type: mapping.type,
-            label: PART_LABELS[mapping.type], // Use Canonical Label for internal structure
+            label: PART_LABELS[mapping.type],
             box,
             imgUrl: croppedUrl,
           };
         }
       }
 
-      // Custom parts from analysis result
       if (analysis.custom && analysis.custom.length > 0) {
           for (const customItem of analysis.custom) {
-              // Find matching CustomPart definition by label
               const matchingPart = appState.customParts.find(cp => cp.label.trim().toLowerCase() === customItem.label.trim().toLowerCase());
-              
               if (matchingPart && customItem.box && customItem.box.length === 4 && customItem.box.some(c => c > 0)) {
                   const [ymin, xmin, ymax, xmax] = customItem.box;
                   const box: BoundingBox = { ymin, xmin, ymax, xmax };
@@ -335,44 +579,100 @@ const App: React.FC = () => {
               }
           }
       }
-
       return { view, parts: newParts };
-
     } catch (err) {
       console.error(`Error processing ${view}:`, err);
       return null;
     }
   };
 
+  const analyzeSingleImage = async (imageToAnalyze: string) => {
+      try {
+          const customLabels = appState.customParts.map(p => p.label);
+          const analysis = await analyzeCharacterImage(imageToAnalyze, customLabels);
+          if (!analysis) return null;
+
+          const parts: Record<string, CharacterPart> = {};
+          const partMappings: { type: string; coords?: number[] }[] = [
+            { type: PartType.FACE, coords: analysis.face },
+            { type: PartType.HAIR, coords: analysis.hair },
+            { type: PartType.HAT, coords: analysis.hat },
+            { type: PartType.JACKET, coords: analysis.jacket },
+            { type: PartType.TOP, coords: analysis.top },
+            { type: PartType.BOTTOM, coords: analysis.bottom },
+            { type: PartType.SHOES, coords: analysis.shoes },
+            { type: PartType.GLOVES, coords: analysis.gloves },
+            { type: PartType.WEAPON, coords: analysis.weapon },
+            { type: PartType.BAG, coords: analysis.bag },
+            { type: PartType.ACCESSORY, coords: analysis.accessory },
+          ];
+
+          for (const mapping of partMappings) {
+            if (mapping.coords && mapping.coords.length === 4 && mapping.coords.some(c => c > 0)) {
+              const [ymin, xmin, ymax, xmax] = mapping.coords;
+              const box: BoundingBox = { ymin, xmin, ymax, xmax };
+              const croppedUrl = await cropImage(imageToAnalyze, box);
+              parts[mapping.type] = { type: mapping.type, label: PART_LABELS[mapping.type], box, imgUrl: croppedUrl };
+            }
+          }
+
+          if (analysis.custom && analysis.custom.length > 0) {
+              for (const customItem of analysis.custom) {
+                  const matchingPart = appState.customParts.find(cp => cp.label.trim().toLowerCase() === customItem.label.trim().toLowerCase());
+                  if (matchingPart && customItem.box && customItem.box.length === 4 && customItem.box.some(c => c > 0)) {
+                      const [ymin, xmin, ymax, xmax] = customItem.box;
+                      const box: BoundingBox = { ymin, xmin, ymax, xmax };
+                      const croppedUrl = await cropImage(imageToAnalyze, box);
+                      parts[matchingPart.id] = { type: matchingPart.id, label: matchingPart.label, box, imgUrl: croppedUrl };
+                  }
+              }
+          }
+          return parts;
+      } catch(e) {
+          console.error("Error analyzing single image", e);
+          return null;
+      }
+  }
+
   const generatePart = async (pType: string, currentState: AppState, overrideModifications?: Modification[]) => {
     const crops: string[] = [];
     
-    // 1. Add Auto-detected crops from views
-    const viewsToCheck = isSingleViewMode 
-        ? [ViewType.FRONT] 
-        : [ViewType.FRONT, ViewType.SEMI_SIDE, ViewType.SIDE, ViewType.BACK];
+    // Logic driven by referenceBalance (0-10)
+    // 0 = Original Only, 10 = Generated Only
+    
+    // 1. ORIGINAL CROP (from User Upload) - Include if balance < 10
+    if (referenceBalance < 10) {
+        const originalCrop = currentState.originalParts[pType]?.imgUrl;
+        if (originalCrop) {
+            crops.push(originalCrop);
+        } else {
+            // Fallback to full upload if crop failed but upload exists
+            // NOTE: We keep this fallback logic here for generation purposes if the part was somehow detected but crop failed?
+            // Actually, if detection failed (no crop), we shouldn't be here because of the filter logic in handleGenerateSheets.
+            // But if we are here (manual override?), this might be useful.
+            const fullUpload = currentState.views[ViewType.FRONT].userUploadedImage;
+            if (fullUpload) crops.push(fullUpload);
+        }
+    }
 
-    viewsToCheck.forEach(v => {
-      const partData = currentState.views[v].parts[pType];
-      if (partData?.imgUrl) {
-        crops.push(partData.imgUrl);
-      }
-    });
+    // 2. Generated/Analyzed Views - Include if balance > 0
+    if (referenceBalance > 0) {
+        const viewsToCheck = isSingleViewMode 
+            ? [ViewType.FRONT] 
+            : [ViewType.FRONT, ViewType.SEMI_SIDE, ViewType.SIDE, ViewType.BACK];
 
-    // 2. Add Manual References if exists
+        viewsToCheck.forEach(v => {
+          const partData = currentState.views[v].parts[pType];
+          if (partData?.imgUrl) {
+            crops.push(partData.imgUrl);
+          }
+        });
+    }
+
+    // 3. Manual References - Always included
     const manualRefs = currentState.manualReferences[pType];
     if (manualRefs && manualRefs.length > 0) {
       crops.push(...manualRefs);
-    }
-
-    // 3. FALLBACK FOR CUSTOM PARTS (If analysis failed to crop, use full view context)
-    if (crops.length === 0) {
-        viewsToCheck.forEach(v => {
-            const fullImg = currentState.views[v].originalImage;
-            if (fullImg) {
-                crops.push(fullImg);
-            }
-        });
     }
 
     if (crops.length === 0) {
@@ -380,11 +680,7 @@ const App: React.FC = () => {
             ...prev,
             generatedSheets: {
               ...prev.generatedSheets,
-              [pType]: { 
-                ...prev.generatedSheets[pType], 
-                imgUrl: null, 
-                isLoading: false 
-              }
+              [pType]: { ...prev.generatedSheets[pType], imgUrl: null, isLoading: false }
             }
         }));
         return;
@@ -398,21 +694,21 @@ const App: React.FC = () => {
       }
     }));
 
-    // Use passed modifications or current state modifications
     const modificationsToUse = overrideModifications || currentState.generatedSheets[pType].modifications;
-
-    // Determine correct label to pass
-    // Internal label for prompting (Canonical English)
     let labelToPass = PART_LABELS[pType];
     if (!labelToPass) {
-        // Find in custom parts
         const custom = currentState.customParts.find(c => c.id === pType);
         labelToPass = custom ? custom.label : "Custom Part";
     }
 
-    // Pass partType to the service to handle specific prompting logic (gloves, etc)
-    // Pass globalStylePrompt from the current state
-    const compositeUrl = await generateCompositeSheet(crops, pType, labelToPass, modificationsToUse, currentState.globalStylePrompt);
+    // Add balance context to style prompt if mixing (1-9)
+    let effectiveStylePrompt = currentState.globalStylePrompt;
+    if (referenceBalance > 0 && referenceBalance < 10) {
+        const balanceNote = `NOTE: Use a blend of reference styles. Original Image Weight: ${10 - referenceBalance}/10. Generated Views Weight: ${referenceBalance}/10.`;
+        effectiveStylePrompt = effectiveStylePrompt ? `${effectiveStylePrompt}. ${balanceNote}` : balanceNote;
+    }
+
+    const compositeUrl = await generateCompositeSheet(crops, pType, labelToPass, modificationsToUse, effectiveStylePrompt);
 
     setAppState(prev => ({
       ...prev,
@@ -428,15 +724,213 @@ const App: React.FC = () => {
   };
 
   const handleRegeneratePart = async (part: string) => {
-      // Don't trigger if already loading
+      if (!verifyApiKey()) return;
       if (appState.generatedSheets[part].isLoading) return;
-      // Reuse existing modifications
+      recordPartHistory(part); // Record before action
       await generatePart(part, appState);
+  };
+  
+  const handleUpscalePart = async (part: string) => {
+      if (!verifyApiKey()) return;
+      if (appState.generatedSheets[part].isLoading) return;
+      const currentImage = appState.generatedSheets[part].imgUrl;
+      if (!currentImage) return;
+
+      recordPartHistory(part); // Record before action
+      setUpscalingParts(prev => [...prev, part]);
+      setAppState(prev => ({
+          ...prev,
+          generatedSheets: {
+              ...prev.generatedSheets,
+              [part]: { ...prev.generatedSheets[part], isLoading: true }
+          }
+      }));
+
+      try {
+          const upscaledUrl = await upscaleImage(currentImage, "16:9");
+          if (upscaledUrl) {
+              setAppState(prev => ({
+                  ...prev,
+                  generatedSheets: {
+                      ...prev.generatedSheets,
+                      [part]: { ...prev.generatedSheets[part], imgUrl: upscaledUrl, isLoading: false }
+                  }
+              }));
+          } else {
+              setAppState(prev => ({
+                  ...prev,
+                  generatedSheets: { ...prev.generatedSheets, [part]: { ...prev.generatedSheets[part], isLoading: false } }
+              }));
+          }
+      } catch (e) {
+          console.error("Upscale failed", e);
+          setAppState(prev => ({
+              ...prev,
+              generatedSheets: { ...prev.generatedSheets, [part]: { ...prev.generatedSheets[part], isLoading: false } }
+          }));
+      } finally {
+          setUpscalingParts(prev => prev.filter(p => p !== part));
+      }
+  };
+
+  // --- Batch Part Operations ---
+  const handleBatchUpscaleParts = async (parts: string[]) => {
+      if (!verifyApiKey()) return;
+      const validParts = parts.filter(p => 
+          appState.generatedSheets[p].imgUrl && 
+          !appState.generatedSheets[p].isLoading &&
+          !upscalingParts.includes(p)
+      );
+      
+      if (validParts.length === 0) return;
+
+      setUpscalingParts(prev => [...prev, ...validParts]);
+      
+      // Set loading state for all batch items
+      setAppState(prev => {
+          const newSheets = { ...prev.generatedSheets };
+          validParts.forEach(p => {
+              newSheets[p] = { ...newSheets[p], isLoading: true };
+          });
+          return { ...prev, generatedSheets: newSheets };
+      });
+
+      // Parallel execution
+      await Promise.all(validParts.map(async (part) => {
+          try {
+              // Record history first
+              recordPartHistory(part);
+              const currentImage = appState.generatedSheets[part].imgUrl!;
+              const upscaled = await upscaleImage(currentImage, "16:9");
+              
+              setAppState(prev => ({
+                  ...prev,
+                  generatedSheets: {
+                      ...prev.generatedSheets,
+                      [part]: { 
+                          ...prev.generatedSheets[part], 
+                          imgUrl: upscaled || prev.generatedSheets[part].imgUrl, 
+                          isLoading: false 
+                      }
+                  }
+              }));
+          } catch (e) {
+              console.error(e);
+              setAppState(prev => ({
+                  ...prev,
+                  generatedSheets: {
+                      ...prev.generatedSheets,
+                      [part]: { ...prev.generatedSheets[part], isLoading: false }
+                  }
+              }));
+          } finally {
+              setUpscalingParts(prev => prev.filter(p => p !== part));
+          }
+      }));
+  };
+
+  const handleBatchRegenerateParts = async (parts: string[]) => {
+      if (!verifyApiKey()) return;
+      const validParts = parts.filter(p => !appState.generatedSheets[p].isLoading);
+      if (validParts.length === 0) return;
+
+      validParts.forEach(p => recordPartHistory(p));
+      await Promise.all(validParts.map(p => generatePart(p, appState)));
+  };
+
+  const handleBatchUndoParts = (parts: string[]) => {
+      parts.forEach(p => handlePartUndo(p));
+  };
+
+  const handleBatchRedoParts = (parts: string[]) => {
+      parts.forEach(p => handlePartRedo(p));
+  };
+
+  // --- Batch Upscale Views ---
+  const handleBatchUpscaleViews = async (targetViews: ViewType[]) => {
+      if (!verifyApiKey()) return;
+      // Filter out views that are already upscaling or have no image
+      const validTargets = targetViews.filter(v => 
+          !upscalingViews.includes(v) && 
+          appState.views[v].originalImage
+      );
+
+      if (validTargets.length === 0) return;
+
+      // Update state to show loading for these views
+      setUpscalingViews(prev => [...prev, ...validTargets]);
+
+      // Execute in parallel
+      await Promise.all(validTargets.map(async (view) => {
+          try {
+              const currentImage = appState.views[view].originalImage;
+              if (!currentImage) return;
+
+              recordViewHistory(view); // Record history before replacing image
+
+              // Views are portrait 3:4
+              const upscaledUrl = await upscaleImage(currentImage, "3:4");
+              
+              if (upscaledUrl) {
+                  updateViewState(view, {
+                      originalImage: upscaledUrl,
+                      generatedImage: upscaledUrl
+                  });
+              }
+          } catch (e) {
+              console.error(`View upscale failed for ${view}`, e);
+          } finally {
+              setUpscalingViews(prev => prev.filter(v => v !== view));
+          }
+      }));
+  };
+
+  // --- Batch Regenerate Views ---
+  const handleBatchRegenerateViews = async (targetViews: ViewType[]) => {
+      if (!verifyApiKey()) return;
+      // Filter valid targets
+      const validTargets = targetViews.filter(v => !processingViews.includes(v));
+      if (validTargets.length === 0) return;
+
+      setProcessingViews(prev => [...prev, ...validTargets]);
+
+      // Execute in parallel
+      await Promise.all(validTargets.map(async (view) => {
+          try {
+              // Same logic as handleRegenerateView but localized
+              const sourceImage = view === ViewType.FRONT 
+                ? (appState.views[ViewType.FRONT].userUploadedImage || appState.views[ViewType.FRONT].originalImage)
+                : appState.views[ViewType.FRONT].originalImage;
+
+              if (!sourceImage) return;
+
+              const contextImage = (view === ViewType.SIDE || view === ViewType.BACK)
+                 ? appState.views[ViewType.SEMI_SIDE].originalImage
+                 : null;
+
+              recordViewHistory(view); // Record history before replacing image
+
+              const newViewImage = await generateCharacterView(sourceImage, view, targetPose, appState.views[view].modifications, contextImage);
+              
+              if (newViewImage) {
+                   updateViewState(view, {
+                       originalImage: newViewImage,
+                       generatedImage: newViewImage
+                   });
+              }
+          } catch (e) {
+              console.error(`View regen failed for ${view}`, e);
+          } finally {
+              setProcessingViews(prev => prev.filter(v => v !== view));
+          }
+      }));
   };
 
   const handlePartModification = async (part: string, prompt: string, image: string | null) => {
+      if (!verifyApiKey()) return;
       if (appState.generatedSheets[part].isLoading) return;
       
+      recordPartHistory(part); // Record before action
       const newModification: Modification = {
           id: Date.now().toString(),
           prompt,
@@ -449,7 +943,6 @@ const App: React.FC = () => {
           newModification
       ];
 
-      // Update state with new prompt history
       setAppState(prev => ({
           ...prev,
           generatedSheets: {
@@ -461,17 +954,14 @@ const App: React.FC = () => {
           }
       }));
 
-      // Trigger generation with new history
       await generatePart(part, appState, updatedModifications);
   };
 
   const handleDeleteModification = async (part: string, modId: string) => {
+      if (!verifyApiKey()) return;
       if (appState.generatedSheets[part].isLoading) return;
-
-      // Filter out the deleted modification
+      recordPartHistory(part); // Record before action
       const updatedModifications = appState.generatedSheets[part].modifications.filter(m => m.id !== modId);
-
-      // Update state
       setAppState(prev => ({
           ...prev,
           generatedSheets: {
@@ -482,15 +972,16 @@ const App: React.FC = () => {
               }
           }
       }));
-
-      // Trigger re-generation with the cleaned history
       await generatePart(part, appState, updatedModifications);
   };
 
   // --- View Modification Handlers ---
   const handleViewModification = async (view: ViewType, prompt: string, image: string | null) => {
-      if (isProcessing) return;
+      if (!verifyApiKey()) return;
+      // Don't block globally if other views are processing, just check this view
+      if (processingViews.includes(view)) return;
 
+      recordViewHistory(view); // Record before action
       const newModification: Modification = {
           id: Date.now().toString(),
           prompt,
@@ -503,80 +994,72 @@ const App: React.FC = () => {
           newModification
       ];
 
-      // Update state first
       updateViewState(view, { modifications: updatedModifications });
-
-      // Trigger regeneration using existing logic
-      await handleRegenerateView(view, updatedModifications);
-  };
-
-  const handleDeleteViewModification = async (view: ViewType, modId: string) => {
-      if (isProcessing) return;
-
-      const updatedModifications = appState.views[view].modifications.filter(m => m.id !== modId);
       
-      // Update state
-      updateViewState(view, { modifications: updatedModifications });
-
-      // Trigger regeneration
-      await handleRegenerateView(view, updatedModifications);
-  };
-
-  const handleRegenerateView = async (view: ViewType, overrideModifications?: Modification[]) => {
-      if (isProcessing) return;
-      setIsProcessing(true);
-      setProcessingView(view); // Mark this view as processing
-      setErrorMsg(null);
+      // FIX: Don't rely on appState for the immediate regeneration call.
+      setProcessingViews(prev => [...prev, view]);
       
-      // Determine label safely
-      let label = t.views[view] || 'VIEW';
-      
-      setStatusText(`${label} ${t.status_waiting.replace("대기중", "...")}`); // Simple fallback logic or just use localized status directly
-
       try {
-          // If checking front view, prefer the user's raw upload to ensure we re-normalize from source
-          // For Side/Back/Semi, we use the (potentially normalized) Front view as the source
           const sourceImage = view === ViewType.FRONT 
             ? (appState.views[ViewType.FRONT].userUploadedImage || appState.views[ViewType.FRONT].originalImage)
             : appState.views[ViewType.FRONT].originalImage;
 
-          if (!sourceImage) {
-              setErrorMsg(t.error_no_ref);
-              setIsProcessing(false);
-              setProcessingView(null);
-              return;
+          if (sourceImage) {
+              const contextImage = (view === ViewType.SIDE || view === ViewType.BACK)
+                 ? appState.views[ViewType.SEMI_SIDE].originalImage
+                 : null;
+
+              const newViewImage = await generateCharacterView(sourceImage, view, targetPose, updatedModifications, contextImage);
+              
+              if (newViewImage) {
+                   updateViewState(view, {
+                       originalImage: newViewImage,
+                       generatedImage: newViewImage
+                   });
+              }
           }
-
-          const modsToUse = overrideModifications || appState.views[view].modifications;
-          
-          // Use Semi-Side as context if regenerating Side or Back
-          const contextImage = (view === ViewType.SIDE || view === ViewType.BACK)
-             ? appState.views[ViewType.SEMI_SIDE].originalImage
-             : null;
-
-          const newViewImage = await generateCharacterView(sourceImage, view, targetPose, modsToUse, contextImage);
-          
-          if (newViewImage) {
-               updateViewState(view, {
-                   originalImage: newViewImage,
-                   // If regenerating Front, we keep the userUploadedImage as is. 
-               });
-          } else {
-              setErrorMsg(t.error_view_fail);
-          }
-
-      } catch (error) {
-          console.error(error);
-          setErrorMsg(t.error_view_fail);
       } finally {
-          setIsProcessing(false);
-          setProcessingView(null);
-          setStatusText(t.status_waiting);
+          setProcessingViews(prev => prev.filter(v => v !== view));
+      }
+  };
+
+  const handleDeleteViewModification = async (view: ViewType, modId: string) => {
+      if (!verifyApiKey()) return;
+      if (processingViews.includes(view)) return;
+      recordViewHistory(view); // Record before action
+
+      const updatedModifications = appState.views[view].modifications.filter(m => m.id !== modId);
+      updateViewState(view, { modifications: updatedModifications });
+      
+      // Trigger regen manually to avoid state race condition
+      setProcessingViews(prev => [...prev, view]);
+      try {
+          const sourceImage = view === ViewType.FRONT 
+            ? (appState.views[ViewType.FRONT].userUploadedImage || appState.views[ViewType.FRONT].originalImage)
+            : appState.views[ViewType.FRONT].originalImage;
+
+          if (sourceImage) {
+              const contextImage = (view === ViewType.SIDE || view === ViewType.BACK)
+                 ? appState.views[ViewType.SEMI_SIDE].originalImage
+                 : null;
+
+              const newViewImage = await generateCharacterView(sourceImage, view, targetPose, updatedModifications, contextImage);
+              
+              if (newViewImage) {
+                   updateViewState(view, {
+                       originalImage: newViewImage,
+                       generatedImage: newViewImage
+                   });
+              }
+          }
+      } finally {
+          setProcessingViews(prev => prev.filter(v => v !== view));
       }
   };
 
   // --- TEXT GENERATION HANDLER ---
   const handleGenerateFromText = async () => {
+      if (!verifyApiKey()) return;
       if (!textPrompt.trim()) {
           setErrorMsg(t.input_prompt);
           return;
@@ -584,24 +1067,23 @@ const App: React.FC = () => {
       
       setIsProcessing(true);
       setErrorMsg(null);
-      setGlobalProgress(0); // Reset
+      setGlobalProgress(0); 
       setStatusText(t.status_text_gen);
 
       try {
-          // Start progress
           setGlobalProgress(10);
           const generatedImage = await generateCharacterFromText(textPrompt, textRefImage);
           setGlobalProgress(100);
           
           if (generatedImage) {
-              // Set as Front View (Both Original and UserUploaded to act as source)
+              // We reset front view, so clear history for front view? or record it?
+              // Usually text generation starts fresh, so just set it.
               updateViewState(ViewType.FRONT, {
                   originalImage: generatedImage,
-                  userUploadedImage: generatedImage, // Treating generated image as source
-                  parts: INITIAL_VIEW_STATE(ViewType.FRONT).parts
+                  userUploadedImage: generatedImage,
+                  parts: INITIAL_VIEW_STATE(ViewType.FRONT).parts,
+                  history: { undoStack: [], redoStack: [] } // Reset history on new char
               });
-              
-              // Switch off text mode to show the result
               setIsTextMode(false);
           } else {
               setErrorMsg("Error Generating Image.");
@@ -618,51 +1100,46 @@ const App: React.FC = () => {
 
   // --- PHASE 1: GENERATE REFERENCE VIEWS ---
   const handleGenerateViews = async () => {
+    if (!verifyApiKey()) return;
     setIsProcessing(true);
     setErrorMsg(null);
     setGlobalProgress(0);
     setStatusText(t.status_ref_check);
 
     let currentViews = { ...appState.views };
-    const frontImage = currentViews[ViewType.FRONT].originalImage;
+    const frontSource = currentViews[ViewType.FRONT].userUploadedImage || currentViews[ViewType.FRONT].originalImage;
 
-    if (!frontImage) {
+    if (!frontSource) {
         setErrorMsg(t.error_no_ref);
         setIsProcessing(false);
         return;
     }
 
     try {
-        setGlobalProgress(5); // Started
+        setGlobalProgress(5); 
 
-        // Step 1: Intermediate 3/4 View Generation (If not single view)
+        // Step 1: Intermediate 3/4 View Generation
         let threeQuarterRef: string | null = null;
         if (!isSingleViewMode) {
-             const needsSemi = !currentViews[ViewType.SEMI_SIDE].originalImage;
+             setStatusText(t.status_3q);
+             threeQuarterRef = await generateCharacterView(frontSource, ViewType.SEMI_SIDE, targetPose, []);
              
-             if (needsSemi) {
-                 setStatusText(t.status_3q);
-                 // Use the RAW user upload if available for max detail, else the working image
-                 const sourceFor3Q = currentViews[ViewType.FRONT].userUploadedImage || frontImage;
-                 // Now we use generateCharacterView with SEMI_SIDE type
-                 threeQuarterRef = await generateCharacterView(sourceFor3Q, ViewType.SEMI_SIDE, targetPose, []);
-                 
-                 if (threeQuarterRef) {
-                     currentViews[ViewType.SEMI_SIDE] = { ...currentViews[ViewType.SEMI_SIDE], originalImage: threeQuarterRef };
-                     setAppState(prev => ({ ...prev, views: { ...prev.views, [ViewType.SEMI_SIDE]: currentViews[ViewType.SEMI_SIDE] } }));
-                 }
-             } else {
-                 threeQuarterRef = currentViews[ViewType.SEMI_SIDE].originalImage;
+             if (threeQuarterRef) {
+                 recordViewHistory(ViewType.SEMI_SIDE);
+                 currentViews[ViewType.SEMI_SIDE] = { 
+                     ...currentViews[ViewType.SEMI_SIDE], 
+                     originalImage: threeQuarterRef, 
+                     generatedImage: threeQuarterRef 
+                 };
+                 setAppState(prev => ({ ...prev, views: { ...prev.views, [ViewType.SEMI_SIDE]: currentViews[ViewType.SEMI_SIDE] } }));
              }
         }
-        setGlobalProgress(35); // 3/4 View Done
+        setGlobalProgress(35); 
 
         // Step 2: Normalize Front View
         setStatusText(`${t.status_norm} (${POSE_LABELS[targetPose]})...`);
-        
-        // Pass any existing modifications for front view if they exist, AND the 3/4 view as context
         const normalizedFront = await generateCharacterView(
-            frontImage, 
+            frontSource, 
             ViewType.FRONT, 
             targetPose, 
             currentViews[ViewType.FRONT].modifications,
@@ -670,61 +1147,61 @@ const App: React.FC = () => {
         );
         
         if (normalizedFront) {
+             recordViewHistory(ViewType.FRONT);
              currentViews[ViewType.FRONT] = {
                  ...currentViews[ViewType.FRONT],
                  originalImage: normalizedFront, 
+                 generatedImage: normalizedFront, 
                  parts: INITIAL_VIEW_STATE(ViewType.FRONT).parts 
              };
-             // Update intermediate state
              setAppState(prev => ({ ...prev, views: { ...prev.views, [ViewType.FRONT]: currentViews[ViewType.FRONT] } }));
         }
-        setGlobalProgress(65); // Front Normalized
+        setGlobalProgress(65); 
 
-        // Step 3: Generate Missing Views (Skip if in Single View Mode)
+        // Step 3: Generate Missing Views
         if (!isSingleViewMode) {
-            const needsSide = !currentViews[ViewType.SIDE].originalImage;
-            const needsBack = !currentViews[ViewType.BACK].originalImage;
+            setStatusText(t.status_4view);
+            const sourceForGeneration = normalizedFront || frontSource;
 
-            if (needsSide || needsBack) {
-                setStatusText(t.status_4view);
-                
-                // Generate using RAW front image (or normalized if we just made it)
-                const sourceForGeneration = currentViews[ViewType.FRONT].userUploadedImage || normalizedFront || frontImage;
+            const [sideImg, backImg] = await Promise.all([
+                generateCharacterView(sourceForGeneration, ViewType.SIDE, targetPose, [], threeQuarterRef),
+                generateCharacterView(sourceForGeneration, ViewType.BACK, targetPose, [], threeQuarterRef)
+            ]);
 
-                const [sideImg, backImg] = await Promise.all([
-                    needsSide ? generateCharacterView(sourceForGeneration!, ViewType.SIDE, targetPose, [], threeQuarterRef) : Promise.resolve(null),
-                    needsBack ? generateCharacterView(sourceForGeneration!, ViewType.BACK, targetPose, [], threeQuarterRef) : Promise.resolve(null)
-                ]);
-
-                if (sideImg) {
-                    currentViews[ViewType.SIDE] = { ...currentViews[ViewType.SIDE], originalImage: sideImg };
-                }
-                if (backImg) {
-                    currentViews[ViewType.BACK] = { ...currentViews[ViewType.BACK], originalImage: backImg };
-                }
-                
-                // Final View State Update for this phase
-                setAppState(prev => ({ ...prev, views: currentViews }));
-                setIsMultiView(true); // Force show all views
+            if (sideImg) {
+                recordViewHistory(ViewType.SIDE);
+                currentViews[ViewType.SIDE] = { 
+                    ...currentViews[ViewType.SIDE], 
+                    originalImage: sideImg, 
+                    generatedImage: sideImg 
+                };
             }
+            if (backImg) {
+                recordViewHistory(ViewType.BACK);
+                currentViews[ViewType.BACK] = { 
+                    ...currentViews[ViewType.BACK], 
+                    originalImage: backImg, 
+                    generatedImage: backImg
+                };
+            }
+            setAppState(prev => ({ ...prev, views: currentViews }));
+            setIsMultiView(true);
         }
-        setGlobalProgress(90); // All Views Done
+        setGlobalProgress(90); 
         
-        // 4. Extract Color Palette Immediately (Requested feature)
-        // We do this if it's not already extracted
         if (appState.colorPalette.length === 0) {
             setStatusText(t.status_palette);
-            const rawFront = currentViews[ViewType.FRONT].userUploadedImage || normalizedFront || frontImage;
+            const rawFront = normalizedFront || frontSource;
             if (rawFront) {
                 const palette = await extractColorPalette(rawFront);
                 setAppState(prev => ({ 
                     ...prev, 
-                    views: currentViews, // Ensure we keep the views
+                    views: currentViews, 
                     colorPalette: palette 
                 }));
             }
         }
-        setGlobalProgress(100); // Palette Done
+        setGlobalProgress(100); 
 
     } catch (e) {
         console.error(e);
@@ -738,6 +1215,7 @@ const App: React.FC = () => {
 
   // --- PHASE 2: ANALYZE AND GENERATE SHEETS ---
   const handleGenerateSheets = async () => {
+      if (!verifyApiKey()) return;
       if (selectedParts.length === 0) {
         setErrorMsg(t.error_select_part);
         return;
@@ -748,22 +1226,19 @@ const App: React.FC = () => {
     setGlobalProgress(0);
     setStatusText(t.status_analyze);
     
-    // DELAYED: Do not show detailed sheets immediately to avoid empty slots
-    // setShowDetailSheets(true);
-
     let currentViews = { ...appState.views };
+    // Keep track of separate original parts crops
+    let newOriginalParts: Record<string, CharacterPart | null> = { ...appState.originalParts };
 
     try {
         setGlobalProgress(5);
-        // In Single View Mode, only analyze Front. Otherwise all 4.
         const viewsToAnalyze = isSingleViewMode 
             ? [ViewType.FRONT] 
             : [ViewType.FRONT, ViewType.SEMI_SIDE, ViewType.SIDE, ViewType.BACK];
 
-        // Perform analysis
+        // 1. Analyze Active Views (Normalized/Generated)
         const analysisResults = await Promise.all(viewsToAnalyze.map(v => processViewAnalysis(v, currentViews[v])));
 
-        // Update view parts
         analysisResults.forEach(res => {
             if (res) {
                 currentViews[res.view] = {
@@ -772,52 +1247,51 @@ const App: React.FC = () => {
                 };
             }
         });
-        
-        setGlobalProgress(20); // Analysis Complete
 
+        // 2. Analyze Original User Upload (If distinct from Active Front)
+        const frontView = currentViews[ViewType.FRONT];
+        if (frontView.userUploadedImage && frontView.userUploadedImage !== frontView.originalImage) {
+            const rawParts = await analyzeSingleImage(frontView.userUploadedImage);
+            if (rawParts) {
+                newOriginalParts = { ...newOriginalParts, ...rawParts };
+            }
+        }
+
+        setGlobalProgress(20); 
+
+        // Detect parts present in EITHER the generated views OR the original parts analysis
         const detectedParts = new Set<string>();
-        
-        // 1. Check if any view has a crop for this part
         const viewsToCheck = isSingleViewMode 
             ? [ViewType.FRONT] 
             : [ViewType.FRONT, ViewType.SEMI_SIDE, ViewType.SIDE, ViewType.BACK];
 
+        // Check generated views
         viewsToCheck.forEach(view => {
              const viewData = currentViews[view];
              if (viewData) {
                  Object.values(PartType).forEach(part => {
-                     if (viewData.parts[part]?.imgUrl) {
-                         detectedParts.add(part);
-                     }
+                     if (viewData.parts[part]?.imgUrl) detectedParts.add(part);
                  });
-                 
-                 // Also check for custom parts detection in the view parts
                  appState.customParts.forEach(cp => {
-                     if (viewData.parts[cp.id]?.imgUrl) {
-                         detectedParts.add(cp.id);
-                     }
+                     if (viewData.parts[cp.id]?.imgUrl) detectedParts.add(cp.id);
                  });
              }
         });
 
-        // 2. Check if there are any manual references
+        // Check original image analysis
+        Object.keys(newOriginalParts).forEach(partId => {
+            if (newOriginalParts[partId]?.imgUrl) detectedParts.add(partId);
+        });
+
+        // Check manual references (Always include if user manually added a ref)
         Object.keys(appState.manualReferences).forEach(key => {
-            if (appState.manualReferences[key] && appState.manualReferences[key].length > 0) {
-                detectedParts.add(key);
-            }
+            if (appState.manualReferences[key] && appState.manualReferences[key].length > 0) detectedParts.add(key);
         });
 
-        // 3. Update Selected Parts to only those that exist
-        // For custom parts, even if no crop is found, we want to allow generation using the full-body fallback.
-        // So we explicitly add all selected custom parts to the 'detected' set to bypass the filter.
-        appState.customParts.forEach(cp => {
-            if (selectedParts.includes(cp.id)) {
-                detectedParts.add(cp.id);
-            }
-        });
-
+        // Filter selected parts: Only keep parts that were actually DETECTED or have MANUAL refs.
+        // We REMOVED the logic that blindly trusted 'selectedParts' just because a User Upload exists.
         const validPartsToGenerate = selectedParts.filter(p => detectedParts.has(p));
-        setSelectedParts(validPartsToGenerate); // Update UI state
+        setSelectedParts(validPartsToGenerate); 
 
         if (validPartsToGenerate.length === 0) {
             setErrorMsg(t.error_no_part);
@@ -826,34 +1300,30 @@ const App: React.FC = () => {
             return;
         }
 
-        // Update state with analysis
         setAppState(prev => ({ 
             ...prev, 
-            views: currentViews
+            views: currentViews,
+            originalParts: newOriginalParts
         }));
         
-        // Temp state for generation
         const tempStateForGeneration: AppState = {
             ...appState,
-            views: currentViews
+            views: currentViews,
+            originalParts: newOriginalParts
         };
 
-        // Generate Sheets using the Valid parts list with Progress Tracking
         setStatusText(t.status_sheet);
-        
         const totalParts = validPartsToGenerate.length;
         let completedParts = 0;
 
-        // Execute in parallel but track progress
         await Promise.all(validPartsToGenerate.map(async (pType) => {
+            recordPartHistory(pType); // Record before generation
             await generatePart(pType, tempStateForGeneration, undefined);
             completedParts++;
-            // Calculate progress: Start at 20%, ends at 100%. Range is 80%.
             const currentProgress = 20 + ((completedParts / totalParts) * 80);
             setGlobalProgress(currentProgress);
         }));
 
-        // NOW SHOW THE SHEETS after generation is complete
         setShowDetailSheets(true);
 
     } catch (e) {
@@ -866,94 +1336,26 @@ const App: React.FC = () => {
     }
   };
 
-  // --- MAIN ACTION HANDLER ---
   const handleMainAction = () => {
+      if (!verifyApiKey()) return;
       if (isTextMode) {
           handleGenerateFromText();
       } else if (hasAllViews) {
           handleGenerateSheets();
       } else {
-          // Trigger the copyright warning before proceeding to generate views
           setShowCopyrightWarning(true);
       }
   };
   
   const confirmCopyrightAndGenerate = () => {
-      setShowCopyrightWarning(false);
+      setShowCopyrightWarning(true); // Re-show if needed or just proceed
       handleGenerateViews();
-  };
-
-  const handleToggleSingleView = () => {
-    const nextMode = !isSingleViewMode;
-    setIsSingleViewMode(nextMode);
-    
-    if (nextMode) {
-        // ENTERING SINGLE VIEW MODE
-        setIsMultiView(false);
-        setIsTextMode(false);
-        
-        // Reset Logic
-        setAppState(prev => {
-            const frontRaw = prev.views[ViewType.FRONT].userUploadedImage;
-            return {
-                ...prev,
-                views: {
-                    ...prev.views,
-                    [ViewType.FRONT]: {
-                        ...prev.views[ViewType.FRONT],
-                        originalImage: frontRaw || prev.views[ViewType.FRONT].originalImage
-                    },
-                    [ViewType.SEMI_SIDE]: INITIAL_VIEW_STATE(ViewType.SEMI_SIDE),
-                    [ViewType.SIDE]: INITIAL_VIEW_STATE(ViewType.SIDE),
-                    [ViewType.BACK]: INITIAL_VIEW_STATE(ViewType.BACK)
-                }
-            };
-        });
-    }
-  };
-
-  const handleToggleTextMode = () => {
-      const nextMode = !isTextMode;
-      setIsTextMode(nextMode);
-      if (nextMode) {
-          setIsMultiView(false);
-          setIsSingleViewMode(false);
-          // Don't reset app state completely to keep uploaded images if any, but focus shifts
-      }
-  };
-  
-  // Handler for global style prompt changes
-  const handleStylePromptChange = (val: string) => {
-      setAppState(prev => ({
-          ...prev,
-          globalStylePrompt: val
-      }));
-  };
-  
-  // API Key Handlers
-  const handleTestApiKey = async () => {
-      if (!apiKeyInput) return;
-      setApiConnectionStatus('testing');
-      const success = await testConnection(apiKeyInput);
-      setApiConnectionStatus(success ? 'success' : 'fail');
-  };
-  
-  const handleSaveApiKey = () => {
-      if (!apiKeyInput) return;
-      saveApiKey(apiKeyInput);
-      setActiveModal(null);
-  };
-  
-  const handleClearApiKey = () => {
-      clearApiKey();
-      setApiKeyInput("");
-      setApiConnectionStatus('idle');
+      setShowCopyrightWarning(false);
   };
 
   return (
     <div className="min-h-screen bg-[#f4f4f4] text-slate-900 p-4 md:p-8 font-sans">
       <style>{`
-        /* Removed loop animation, will use width transition for real progress */
         .progress-bar-fill {
             transition: width 0.5s ease-out;
         }
@@ -963,64 +1365,28 @@ const App: React.FC = () => {
         {/* Header Section */}
         <div className="relative text-center mb-12 pt-10">
           
-          {/* Top Right Controls: API Key & Language */}
           <div className="absolute top-0 right-0 z-50 flex items-center gap-4">
-              
-              {/* Google Login Status Button */}
-              {isGoogleConnected ? (
-                  <button 
-                      className="flex items-center gap-2 text-green-600 bg-white/80 px-3 py-1.5 rounded-full shadow-sm border border-green-100 hover:border-green-300 transition-colors"
-                      title="Google 계정으로 연결됨"
-                  >
-                      <CheckCircle size={16} className="fill-green-100" />
-                      <span className="text-xs font-bold uppercase hidden md:inline">Connected</span>
-                  </button>
-              ) : (
-                  <button 
-                      onClick={handleGoogleLogin}
-                      className="flex items-center gap-2 text-white bg-[#0F4C81] px-4 py-1.5 rounded-full shadow-md hover:bg-blue-900 transition-colors animate-pulse-subtle"
-                      title="Google 계정으로 로그인 (API Key 자동 설정)"
-                  >
-                      <LogIn size={14} />
-                      <span className="text-xs font-bold uppercase">Google Login</span>
-                  </button>
-              )}
-
-              {/* API Key Button - Changes appearance if connected */}
-              <button 
-                  onClick={() => setActiveModal('apikey')}
-                  className={`
-                    flex items-center gap-2 transition-colors
-                    ${isGoogleConnected ? 'text-slate-300 hover:text-slate-500' : 'text-slate-400 hover:text-[#0F4C81]'}
-                  `}
-                  title="API Key Settings"
-              >
-                  <Key size={18} />
-                  <span className="text-xs font-bold uppercase hidden md:inline">API Key</span>
-              </button>
-
-              {/* Language Selector */}
-              <div className="flex items-center gap-2 border-l border-slate-300 pl-4">
-                  <Globe size={18} className="text-slate-400" />
-                  <select 
-                      value={language}
-                      onChange={(e) => {
-                          setLanguage(e.target.value as Language);
-                          // Update Status text immediately when language changes
-                          setStatusText(TRANSLATIONS[e.target.value as Language].status_waiting);
-                      }}
-                      className="bg-transparent text-sm font-bold text-slate-600 hover:text-[#0F4C81] focus:outline-none cursor-pointer appearance-none uppercase"
-                  >
-                      <option value={Language.KO}>한국어</option>
-                      <option value={Language.EN}>English</option>
-                      <option value={Language.JA}>日本語</option>
-                      <option value={Language.ZH}>中文</option>
-                  </select>
+              <div className="flex items-center gap-2">
+                <Globe size={18} className="text-slate-400" />
+                <select 
+                    value={language}
+                    onChange={(e) => {
+                        setLanguage(e.target.value as Language);
+                        setStatusText(TRANSLATIONS[e.target.value as Language].status_waiting);
+                    }}
+                    className="bg-transparent text-sm font-bold text-slate-600 hover:text-[#0F4C81] focus:outline-none cursor-pointer appearance-none uppercase"
+                >
+                    <option value={Language.KO}>한국어</option>
+                    <option value={Language.EN}>English</option>
+                    <option value={Language.JA}>日本語</option>
+                    <option value={Language.ZH}>中文</option>
+                    <option value={Language.ES}>Español</option>
+                </select>
               </div>
           </div>
 
           <div className="flex items-center justify-center gap-4 mb-4">
-              <Palette size={48} className="text-[#0F4C81]" />
+              <Mascot size={64} emotion="happy" />
               <h1 className="text-6xl md:text-8xl font-black text-[#1a1a1a] tracking-tighter font-[Rajdhani] uppercase leading-none">
                 CharSheet <span className="text-[#0F4C81]">AI</span>
               </h1>
@@ -1041,10 +1407,32 @@ const App: React.FC = () => {
               </div>
           </div>
 
-          {/* Info Section: Usage & Patch Notes - CLICKABLE CARDS */}
-          <div className="flex flex-col md:flex-row justify-center gap-4 max-w-3xl mx-auto text-left mb-10">
+          {/* Info Section */}
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 max-w-5xl mx-auto text-left mb-10">
               
-              {/* Usage Guide Button */}
+              {/* API Key Button (New Location) */}
+              <button
+                  onClick={() => setActiveModal('apikey')}
+                  className={`
+                      flex-1 bg-white p-6 shadow-md border-b-4 hover:-translate-y-1 transition-all text-left group
+                      ${!hasKeyConfigured ? 'border-red-400 hover:border-red-600' : 'border-slate-200 hover:border-[#0F4C81]'}
+                  `}
+              >
+                  <div className="flex items-center gap-2 mb-3">
+                      <Key size={14} className={`${!hasKeyConfigured ? 'text-red-500' : 'text-[#0F4C81]'} group-hover:scale-110 transition-transform`} />
+                      <span className={`text-xs font-bold uppercase tracking-widest ${!hasKeyConfigured ? 'text-red-500' : 'text-slate-400 group-hover:text-[#0F4C81]'}`}>
+                          {t.api_settings_title}
+                      </span>
+                      {!hasKeyConfigured && <span className="flex h-2 w-2 relative"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span><span className="relative inline-flex rounded-full h-2 w-2 bg-red-500"></span></span>}
+                  </div>
+                  <h3 className={`font-bold text-lg mb-1 ${!hasKeyConfigured ? 'text-red-600' : 'text-slate-800'}`}>
+                      {t.api_settings_title}
+                  </h3>
+                  <p className={`text-xs font-medium ${!hasKeyConfigured ? 'text-red-400' : 'text-slate-500'}`}>
+                      {!hasKeyConfigured ? t.no_key_warning.split('\n')[0] : t.api_settings_desc}
+                  </p>
+              </button>
+
               <button 
                   onClick={() => setActiveModal('usage')}
                   className="flex-1 bg-white p-6 shadow-md border-b-4 border-slate-200 hover:border-[#0F4C81] hover:-translate-y-1 transition-all text-left group"
@@ -1057,7 +1445,6 @@ const App: React.FC = () => {
                   <p className="text-xs text-slate-500 font-medium">{t.usage_desc}</p>
               </button>
 
-              {/* Patch Notes Button */}
               <button 
                   onClick={() => setActiveModal('patch')}
                   className="flex-1 bg-white p-6 shadow-md border-b-4 border-slate-200 hover:border-[#0F4C81] hover:-translate-y-1 transition-all text-left group"
@@ -1069,20 +1456,50 @@ const App: React.FC = () => {
                   <h3 className="font-bold text-lg mb-1 text-slate-800">{t.patch_notes}</h3>
                   <p className="text-xs text-slate-500 font-medium">{t.patch_desc}</p>
               </button>
+
+              <button 
+                  onClick={() => setActiveModal('coffee')}
+                  className="flex-1 bg-white p-6 shadow-md border-b-4 border-orange-200 hover:border-orange-400 hover:-translate-y-1 transition-all text-left group"
+              >
+                  <div className="flex items-center gap-2 mb-3">
+                      <Coffee size={14} className="text-orange-500 group-hover:scale-110 transition-transform" />
+                      <span className="text-xs font-bold text-slate-400 uppercase tracking-widest group-hover:text-orange-500">Support</span>
+                  </div>
+                  <h3 className="font-bold text-lg mb-1 text-slate-800">{t.buy_coffee}</h3>
+                  <p className="text-xs text-slate-500 font-medium whitespace-pre-line">Dev Support</p>
+              </button>
           </div>
         </div>
 
         {/* --- MODALS --- */}
         <Modal isOpen={activeModal === 'usage'} onClose={() => setActiveModal(null)} title={t.usage_guide}>
              <div className="space-y-8 text-slate-800">
-                 {/* Usage Content simplified for translation or just kept simple */}
-                 <p className="text-sm">{t.usage_desc}</p>
+                 {t.usage_steps && t.usage_steps.map((step: any, index: number) => (
+                    <div key={index} className="flex gap-4">
+                        <div className="w-8 h-8 rounded-full bg-[#0F4C81] text-white flex items-center justify-center font-bold flex-shrink-0">
+                            {index + 1}
+                        </div>
+                        <div>
+                             <h3 className="font-bold text-lg mb-2">{step.title}</h3>
+                             <p className="text-sm text-slate-600 leading-relaxed mb-2">
+                                 {step.desc}
+                             </p>
+                             {step.bullets && step.bullets.length > 0 && (
+                                 <ul className="list-disc pl-4 text-xs text-slate-500 space-y-1">
+                                     {step.bullets.map((bullet: string, bIdx: number) => (
+                                         <li key={bIdx}>{bullet}</li>
+                                     ))}
+                                 </ul>
+                             )}
+                        </div>
+                    </div>
+                 ))}
              </div>
         </Modal>
 
         <Modal isOpen={activeModal === 'patch'} onClose={() => setActiveModal(null)} title={t.patch_notes}>
              <div className="space-y-0 divide-y divide-slate-100">
-                 {PATCH_NOTES.map((note, idx) => (
+                 {t.patch_notes_list && t.patch_notes_list.map((note: any, idx: number) => (
                      <div key={idx} className="py-4 hover:bg-slate-50 px-2 rounded transition-colors">
                          <div className="flex justify-between items-center mb-1">
                              <span className={`font-bold text-lg ${idx === 0 ? 'text-[#0F4C81]' : 'text-slate-700'}`}>
@@ -1096,113 +1513,113 @@ const App: React.FC = () => {
                  ))}
              </div>
         </Modal>
-        
-        {/* API KEY MODAL */}
-        <Modal isOpen={activeModal === 'apikey'} onClose={() => setActiveModal(null)} title="API Key 설정">
-             <div className="space-y-8">
+
+        <Modal isOpen={activeModal === 'coffee'} onClose={() => setActiveModal(null)} title={t.coffee_modal_title}>
+             <div className="flex flex-col items-center text-center p-4">
+                 <div className="w-20 h-20 bg-orange-100 rounded-full flex items-center justify-center mb-6">
+                     <Coffee size={40} className="text-orange-600" />
+                 </div>
+                 <h3 className="text-2xl font-black text-slate-800 mb-4">{t.buy_coffee}</h3>
+                 <p className="text-slate-600 leading-relaxed whitespace-pre-line mb-8 font-medium">
+                     {t.coffee_modal_body}
+                 </p>
                  
-                 {/* Section 1: Google Auth (Recommended) */}
-                 <div className={`p-5 rounded-lg border-2 transition-all ${isGoogleConnected ? 'bg-green-50 border-green-200' : 'bg-slate-50 border-slate-100'}`}>
-                     <div className="flex items-center gap-3 mb-3">
-                         <div className={`p-2 rounded-full ${isGoogleConnected ? 'bg-green-100 text-green-700' : 'bg-white text-slate-700 shadow-sm'}`}>
-                             <LogIn size={20} />
-                         </div>
-                         <h3 className="font-bold text-lg text-slate-800">Google 계정으로 자동 연결</h3>
-                         {isGoogleConnected && <span className="text-xs bg-green-200 text-green-800 px-2 py-0.5 rounded font-bold uppercase">Active</span>}
-                     </div>
-                     
-                     <p className="text-sm text-slate-500 mb-4 leading-relaxed">
-                         Google 계정으로 로그인하면 별도의 API Key 입력 없이<br/>
-                         Gemini AI 기능을 즉시 사용할 수 있습니다. (권장)
-                     </p>
-                     
-                     {isGoogleConnected ? (
-                         <div className="flex items-center gap-2 text-green-700 font-bold bg-green-100/50 p-3 rounded">
-                             <CheckCircle size={18} />
-                             Google 계정과 성공적으로 연결되었습니다.
-                         </div>
-                     ) : (
-                         <button 
-                            onClick={handleGoogleLogin}
-                            className="w-full bg-[#0F4C81] hover:bg-blue-900 text-white py-3 rounded font-bold transition-colors flex items-center justify-center gap-2 shadow-lg"
-                         >
-                             <Zap size={18} className="fill-white" />
-                             Google 계정으로 로그인
-                         </button>
-                     )}
-                 </div>
-                 
-                 <div className="relative flex items-center justify-center">
-                     <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-slate-200"></div></div>
-                     <span className="relative bg-white px-4 text-xs font-bold text-slate-400 uppercase tracking-widest">OR</span>
-                 </div>
+                 <a 
+                    href={language === Language.KO ? "https://aq.gy/f/cTOja" : "https://paypal.me/mookxy"} 
+                    target="_blank" 
+                    rel="noopener noreferrer"
+                    className="w-full py-4 mb-8 bg-orange-500 hover:bg-orange-600 text-white font-bold rounded-xl shadow-lg transition-transform hover:-translate-y-1 flex items-center justify-center gap-3 text-lg"
+                 >
+                    <Coffee size={24} />
+                    <span>{t.btn_coffee_link}</span>
+                 </a>
 
-                 {/* Section 2: Manual Key Entry */}
-                 <div className={isGoogleConnected ? 'opacity-50 pointer-events-none grayscale' : ''}>
-                     <div className="bg-slate-50 p-4 rounded text-sm text-slate-600 leading-relaxed mb-4">
-                         <p className="font-bold mb-1">수동 API Key 입력</p>
-                         <p className="text-xs opacity-80">
-                            직접 발급받은 Google Gemini API Key가 있다면 아래에 입력해주세요.<br/>
-                            입력된 키는 브라우저에 암호화되어 저장됩니다.
-                         </p>
-                     </div>
-
-                     <div className="flex flex-col gap-2 mb-4">
-                         <label className="text-sm font-bold text-slate-700 uppercase">Google Gemini API Key</label>
-                         <input 
-                            type="password" 
-                            value={apiKeyInput}
-                            onChange={(e) => {
-                                setApiKeyInput(e.target.value);
-                                setApiConnectionStatus('idle');
-                            }}
-                            placeholder="AIzaSy..."
-                            className="w-full p-3 border border-slate-300 rounded focus:border-[#0F4C81] focus:outline-none font-mono text-sm"
-                            disabled={isGoogleConnected}
-                         />
-                     </div>
-
-                     <div className="flex items-center gap-3">
-                         <button
-                            onClick={handleTestApiKey}
-                            disabled={!apiKeyInput || apiConnectionStatus === 'testing' || isGoogleConnected}
-                            className={`
-                                px-4 py-2 rounded text-sm font-bold transition-colors flex items-center gap-2
-                                ${apiConnectionStatus === 'success' ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'}
-                            `}
-                         >
-                             {apiConnectionStatus === 'testing' && <Loader2 size={14} className="animate-spin" />}
-                             {apiConnectionStatus === 'success' && <Check size={14} />}
-                             {apiConnectionStatus === 'fail' && <AlertTriangle size={14} />}
-                             
-                             {apiConnectionStatus === 'idle' && "연결 테스트"}
-                             {apiConnectionStatus === 'testing' && "테스트 중..."}
-                             {apiConnectionStatus === 'success' && "연결 성공"}
-                             {apiConnectionStatus === 'fail' && "연결 실패"}
-                         </button>
-                     </div>
-                 </div>
-
-                 <div className="pt-4 border-t border-slate-100 flex justify-between items-center">
-                     <button 
-                        onClick={handleClearApiKey}
-                        className="text-red-500 text-sm font-bold hover:underline disabled:opacity-50"
-                        disabled={!apiKeyInput}
-                     >
-                         저장된 키 삭제
-                     </button>
-                     <button
-                        onClick={handleSaveApiKey}
-                        disabled={!apiKeyInput || isGoogleConnected}
-                        className="bg-slate-800 text-white px-6 py-2 rounded font-bold hover:bg-black transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                     >
-                         수동 입력 저장
-                     </button>
+                 <div className="w-full bg-slate-50 p-4 rounded-lg border border-slate-200 text-sm text-slate-500">
+                     <Heart size={16} className="inline-block mr-2 text-red-500 fill-red-500" />
+                     Thank you for your support!
                  </div>
              </div>
         </Modal>
 
-        {/* COPYRIGHT WARNING CONFIRMATION MODAL */}
+        {/* API KEY MODAL */}
+        <Modal isOpen={activeModal === 'apikey'} onClose={() => setActiveModal(null)} title={t.api_settings_title}>
+            <div className="flex flex-col gap-6">
+                
+                {/* Guide Section */}
+                <div className="bg-slate-50 p-6 rounded-lg border border-slate-200">
+                    <h3 className="font-bold text-slate-800 mb-3 flex items-center gap-2">
+                        <Key size={18} className="text-[#0F4C81]" />
+                        API Key 발급 가이드
+                    </h3>
+                    <div className="flex flex-col gap-2 mb-4">
+                        {t.api_guide_steps && t.api_guide_steps.map((step: string, idx: number) => (
+                            <p key={idx} className="text-sm text-slate-600 leading-relaxed">{step}</p>
+                        ))}
+                    </div>
+                    <a 
+                        href="https://aistudio.google.com/app/apikey" 
+                        target="_blank" 
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-2 text-sm font-bold text-white bg-slate-800 px-4 py-2 rounded hover:bg-black transition-colors"
+                    >
+                        <ExternalLink size={16} />
+                        {t.api_guide_link}
+                    </a>
+                </div>
+
+                <div className="bg-blue-50 p-4 border border-blue-100 rounded text-sm text-[#0F4C81] font-medium flex gap-3">
+                    <ShieldAlert className="shrink-0" size={20} />
+                    <p>{t.api_key_desc}</p>
+                </div>
+
+                <div className="flex flex-col gap-2">
+                    <label className="text-xs font-bold uppercase tracking-widest text-slate-500">Google Gemini API Key</label>
+                    <input 
+                        type="password" 
+                        value={apiKeyInput}
+                        onChange={(e) => setApiKeyInput(e.target.value)}
+                        placeholder={t.api_key_placeholder}
+                        className="w-full p-4 border border-slate-300 rounded focus:border-[#0F4C81] outline-none font-mono text-sm"
+                    />
+                </div>
+
+                <div className="flex gap-4 items-center">
+                    <button 
+                        onClick={handleSaveApiKey}
+                        className="px-6 py-3 bg-[#0F4C81] text-white font-bold rounded hover:bg-blue-900 transition-colors shadow-sm flex items-center gap-2"
+                    >
+                        <Check size={18} /> {t.btn_save_key}
+                    </button>
+                    <button 
+                        onClick={handleTestConnection}
+                        disabled={!apiKeyInput}
+                        className="px-6 py-3 bg-white border border-slate-300 text-slate-700 font-bold rounded hover:bg-slate-50 transition-colors shadow-sm flex items-center gap-2 disabled:opacity-50"
+                    >
+                        {apiKeyStatus === "testing" ? <Loader2 size={18} className="animate-spin" /> : <Zap size={18} />}
+                        {t.btn_test_conn}
+                    </button>
+                    <button 
+                        onClick={handleClearApiKey}
+                        className="px-4 py-3 text-red-500 font-bold rounded hover:bg-red-50 transition-colors ml-auto flex items-center gap-2"
+                    >
+                        <Trash2 size={18} /> {t.btn_delete_key}
+                    </button>
+                </div>
+
+                {apiKeyStatus === "success" && (
+                    <div className="p-3 bg-green-50 text-green-700 border border-green-200 rounded font-bold text-center animate-fade-in flex items-center justify-center gap-2">
+                        <Check size={18} /> {t.conn_success}
+                    </div>
+                )}
+                {apiKeyStatus === "fail" && (
+                    <div className="p-3 bg-red-50 text-red-700 border border-red-200 rounded font-bold text-center animate-fade-in flex items-center justify-center gap-2">
+                        <X size={18} /> {t.conn_fail}
+                    </div>
+                )}
+            </div>
+        </Modal>
+
+        {/* COPYRIGHT WARNING */}
         {showCopyrightWarning && (
             <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-fade-in">
                 <div className="bg-white w-full max-w-lg shadow-2xl rounded-xl overflow-hidden animate-scale-in">
@@ -1240,7 +1657,6 @@ const App: React.FC = () => {
 
         {/* Mode Toggles */}
         <div className="flex justify-center gap-4 mb-10 flex-wrap">
-            {/* Multi View Toggle */}
             <button
                 onClick={() => {
                     if (isSingleViewMode) setIsSingleViewMode(false);
@@ -1262,7 +1678,6 @@ const App: React.FC = () => {
                 </span>
             </button>
 
-            {/* Single View Mode Toggle */}
              <button
                 onClick={handleToggleSingleView}
                 className={`
@@ -1280,7 +1695,6 @@ const App: React.FC = () => {
                 {isSingleViewMode && <Check size={16} />}
             </button>
 
-            {/* Text Generation Mode Toggle */}
             <button
                 onClick={handleToggleTextMode}
                 className={`
@@ -1299,7 +1713,7 @@ const App: React.FC = () => {
             </button>
         </div>
 
-        {/* INPUT AREA: Swaps between Image Grid and Text Input */}
+        {/* INPUT AREA */}
         {isTextMode ? (
              <div className="max-w-4xl mx-auto mb-16 animate-fade-in bg-white p-8 shadow-xl border-t-8 border-[#0F4C81]">
                  <div className="flex flex-col md:flex-row gap-8">
@@ -1335,7 +1749,6 @@ const App: React.FC = () => {
                  </div>
              </div>
         ) : (
-            /* Standard Image Upload Grid - UPDATED TO 4 COLUMNS */
             <div className={`
                 grid gap-8 mb-16 transition-all duration-500 ease-in-out
                 ${(isMultiView && !isSingleViewMode) ? 'grid-cols-1 md:grid-cols-4' : 'grid-cols-1 max-w-2xl mx-auto'}
@@ -1390,7 +1803,7 @@ const App: React.FC = () => {
             </div>
         )}
 
-        {/* Pose Selection - Only show if not all views generated yet AND not in Single View Mode AND not Text Mode */}
+        {/* Pose Selection */}
         {!hasAllViews && !isSingleViewMode && !isTextMode && (
             <div className="max-w-3xl mx-auto mb-10 text-center animate-fade-in">
                  <h3 className="text-slate-400 uppercase tracking-widest text-base font-bold mb-6">
@@ -1418,14 +1831,12 @@ const App: React.FC = () => {
             </div>
         )}
 
-        {/* Part Selection Grid - Only Show if Views are Ready */}
+        {/* Part Selection */}
         <div className={`max-w-[1400px] mx-auto mb-10 transition-all duration-500 ${hasAllViews ? 'opacity-100' : 'opacity-40 grayscale pointer-events-none'}`}>
             <h3 className="text-center text-slate-400 uppercase tracking-widest text-base font-bold mb-6">
                 {t.part_select}
             </h3>
-            {/* UPDATED GRID: 6 COLUMNS */}
             <div className="grid grid-cols-2 md:grid-cols-6 gap-4">
-                {/* Standard Parts */}
                 {Object.values(PartType).map((part) => (
                     <button
                         key={part}
@@ -1444,7 +1855,6 @@ const App: React.FC = () => {
                     </button>
                 ))}
 
-                {/* Custom Parts */}
                 {appState.customParts.map((part) => (
                     <div 
                         key={part.id} 
@@ -1481,7 +1891,6 @@ const App: React.FC = () => {
                     </div>
                 ))}
 
-                {/* "ETC" Add Button - REPLACED WITH DIRECT INPUT */}
                 <div className="relative flex items-center gap-2 px-2 py-2 border border-dashed border-slate-300 bg-slate-50 hover:bg-white transition-all h-full">
                     <input
                         type="text"
@@ -1511,7 +1920,6 @@ const App: React.FC = () => {
             </div>
           )}
           
-          {/* Main Action Button - HIDDEN WHEN VIEWS ARE READY (STEP 1 DONE) */}
           {!hasAllViews && (
             <>
                 <button
@@ -1529,7 +1937,7 @@ const App: React.FC = () => {
                         <div className="flex items-center gap-6">
                             {isProcessing ? (
                                 <>
-                                    <Loader2 className="animate-spin w-8 h-8" />
+                                    <Mascot size={32} emotion="thinking" />
                                     {statusText}
                                 </>
                             ) : isTextMode ? (
@@ -1544,7 +1952,6 @@ const App: React.FC = () => {
                                 </>
                             )}
                         </div>
-                        {/* Main Button Gauge Bar - ACTUAL PROGRESS */}
                         {isProcessing && (
                             <div className="w-64 h-1.5 bg-white/20 rounded-full overflow-hidden relative mt-4">
                                 <div 
@@ -1576,7 +1983,7 @@ const App: React.FC = () => {
           )}
         </div>
 
-        {/* Result Section - Show when we have all views (Step 1 complete) */}
+        {/* Result Section */}
         {hasAllViews && (
             <div className="animate-fade-in-up">
                   <CharacterSheet 
@@ -1584,7 +1991,7 @@ const App: React.FC = () => {
                       selectedParts={selectedParts} 
                       showDetailSheets={showDetailSheets}
                       onRegeneratePart={handleRegeneratePart}
-                      onRegenerateView={(view) => handleRegenerateView(view)}
+                      onRegenerateView={(view) => handleBatchRegenerateViews([view])}
                       onManualPartUpload={handleAddManualReference}
                       onRemoveManualReference={handleRemoveManualReference}
                       onPartModification={handlePartModification}
@@ -1592,19 +1999,47 @@ const App: React.FC = () => {
                       onRemovePartCrop={handleRemovePartCrop}
                       onViewModification={handleViewModification}
                       onDeleteViewModification={handleDeleteViewModification}
-                      processingView={processingView}
+                      processingView={null} // Deprecated, using processingViews array
                       onGenerateSheets={handleGenerateSheets}
                       isProcessing={isProcessing}
                       progress={globalProgress}
-                      // New props
                       globalStylePrompt={appState.globalStylePrompt}
                       onStylePromptChange={handleStylePromptChange}
                       onReset={handleResetProject}
                       language={language}
+                      onOpenSupport={() => setActiveModal('coffee')}
+                      onSwapViewImage={handleSwapViewImage}
+                      onUpscalePart={handleUpscalePart}
+                      onUpscaleView={(view) => handleBatchUpscaleViews([view])}
+                      upscalingView={null} // Deprecated
+                      upscalingPart={null} // Deprecated in favor of upscalingParts array, pass null or manage locally
+                      upscalingParts={upscalingParts} // Pass array for batch support
+                      
+                      // Batch Props
+                      processingViews={processingViews}
+                      upscalingViews={upscalingViews}
+                      selectedRefViews={selectedViewIds}
+                      onToggleRefView={toggleViewSelection}
+                      onBatchRegenerateViews={handleBatchRegenerateViews}
+                      onBatchUpscaleViews={handleBatchUpscaleViews}
+                      
+                      // Ref Balance
+                      referenceBalance={referenceBalance}
+                      onReferenceBalanceChange={setReferenceBalance}
+
+                      // Undo/Redo Handlers (Passed Down)
+                      onViewUndo={handleViewUndo}
+                      onViewRedo={handleViewRedo}
+                      onPartUndo={handlePartUndo}
+                      onPartRedo={handlePartRedo}
+
+                      // Batch Part Handlers
+                      onBatchUpscaleParts={handleBatchUpscaleParts}
+                      onBatchRegenerateParts={handleBatchRegenerateParts}
+                      onBatchUndoParts={handleBatchUndoParts}
+                      onBatchRedoParts={handleBatchRedoParts}
                   />
-                  <div className="text-center mt-20 mb-20">
-                     {/* Bottom Reset Button Removed */}
-                  </div>
+                  <div className="text-center mt-20 mb-20"></div>
             </div>
         )}
 

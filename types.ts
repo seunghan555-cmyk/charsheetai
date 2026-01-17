@@ -1,7 +1,7 @@
 
 export enum ViewType {
   FRONT = 'FRONT',
-  SEMI_SIDE = 'SEMI_SIDE', // New: 3/4 View
+  SEMI_SIDE = 'SEMI_SIDE',
   SIDE = 'SIDE',
   BACK = 'BACK',
 }
@@ -31,6 +31,7 @@ export enum Language {
   EN = 'EN',
   JA = 'JA',
   ZH = 'ZH',
+  ES = 'ES',
 }
 
 export interface BoundingBox {
@@ -41,10 +42,10 @@ export interface BoundingBox {
 }
 
 export interface CharacterPart {
-  type: string; // Changed to string to support custom parts
+  type: string;
   label: string;
   box: BoundingBox;
-  imgUrl: string | null; // The cropped image data URL
+  imgUrl: string | null;
 }
 
 export interface Modification {
@@ -54,20 +55,39 @@ export interface Modification {
   timestamp: number;
 }
 
+export interface ViewHistoryItem {
+    originalImage: string | null;
+    generatedImage: string | null;
+    modifications: Modification[];
+}
+
+export interface PartHistoryItem {
+    imgUrl: string | null;
+    modifications: Modification[];
+}
+
+export interface HistoryState<T> {
+    undoStack: T[];
+    redoStack: T[];
+}
+
 export interface CharacterView {
   id: ViewType;
   label: string;
-  originalImage: string | null; // Base64 or Object URL (This is the "working" image, potentially normalized)
-  userUploadedImage: string | null; // The raw original user upload
-  parts: Record<string, CharacterPart | null>; // Changed key to string
-  modifications: Modification[]; // History of user refinements for this specific view
+  originalImage: string | null;
+  userUploadedImage: string | null;
+  generatedImage: string | null;
+  parts: Record<string, CharacterPart | null>;
+  modifications: Modification[];
+  history: HistoryState<ViewHistoryItem>;
 }
 
 export interface GeneratedPartSheet {
-  partType: string; // Changed to string
-  imgUrl: string | null; // The single composite AI-generated image
+  partType: string;
+  imgUrl: string | null;
   isLoading: boolean;
-  modifications: Modification[]; // Stack of user requests
+  modifications: Modification[];
+  history: HistoryState<PartHistoryItem>;
 }
 
 export interface CustomPart {
@@ -82,14 +102,14 @@ export interface AppState {
     [ViewType.SIDE]: CharacterView;
     [ViewType.BACK]: CharacterView;
   };
-  generatedSheets: Record<string, GeneratedPartSheet>; // Changed key to string
-  manualReferences: Record<string, string[]>; // Stores manual uploads for specific parts (Array). Key string.
-  customParts: CustomPart[]; // New: List of custom parts created by user
+  generatedSheets: Record<string, GeneratedPartSheet>;
+  manualReferences: Record<string, string[]>;
+  customParts: CustomPart[];
   colorPalette: string[];
-  globalStylePrompt: string; // New: User defined style override
+  globalStylePrompt: string;
+  originalParts: Record<string, CharacterPart | null>;
 }
 
-// Response schema from Gemini
 export interface GeminiPartAnalysis {
   face?: number[];
   hair?: number[];
@@ -102,21 +122,8 @@ export interface GeminiPartAnalysis {
   weapon?: number[];
   bag?: number[];
   accessory?: number[];
-  // New: Array of custom detected parts
   custom?: {
       label: string;
       box: number[];
   }[];
-}
-
-// Global window extension for Google AI Studio
-declare global {
-  interface AIStudio {
-    hasSelectedApiKey: () => Promise<boolean>;
-    openSelectKey: () => Promise<void>;
-  }
-
-  interface Window {
-    aistudio?: AIStudio;
-  }
 }
